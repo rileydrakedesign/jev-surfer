@@ -99,6 +99,7 @@ class Lease(BaseModel):
     last_used_at: datetime                    # any prompt that consulted the lease
     last_route_started_at: datetime           # start time of the route that last wrote the selection
     index_head: str | None                    # meta.index_head at last write (logging only; see D-10-2)
+    index_fp: str | None                      # meta content_fingerprint + config_fingerprint (05) at last validation
     selection: Selection                      # content ordered newest-first (§4.3); caps sorted by id
     items: dict[SurfaceId, LeaseItemMeta]     # one entry per id in selection.content
     stale: bool = False
@@ -107,7 +108,7 @@ class Lease(BaseModel):
     rev: int                                  # +1 on every write, including touches
 ```
 
-Spec record fields are all present; added fields are `v`, `task_id`, `last_request`, `last_route_started_at`, `items`, `stale_reason`, `rev`.
+Spec record fields are all present; added fields are `v`, `task_id`, `last_request`, `last_route_started_at`, `index_fp`, `items`, `stale_reason`, `rev`. `task_request` and `last_request` are always the **redacted** text (14 D-14-7); the raw prompt is never stored.
 
 ### 3.2 Other types
 
@@ -140,8 +141,8 @@ class CommitResult(BaseModel):
     lease: Lease | None
 
 ExpireReason = Literal["idle", "compaction", "clear", "session-end", "reroute", "corrupt", "version"]
-ContinuityReason = Literal["no-lease", "judge", "low-confidence", "stale", "path-hit-outside-lease",
-                           "missing-answer"]
+ContinuityReason = Literal["no_lease", "judge", "low_conf", "stale", "path_hits_outside_lease",
+                           "missing_answer"]          # same strings as 09's `override` field
 ```
 
 ### 3.3 File layout
@@ -163,16 +164,16 @@ Called by the pipeline after call 1. Rules are evaluated in order; the first mat
 
 | # | Condition | Result | Reason |
 |---|---|---|---|
-| 1 | no lease | `new` | `no-lease` |
-| 2 | lease exists but `continuity` answer missing (that key failed or was dropped) | `extends` | `missing-answer` |
-| 3 | `answer.confidence < min_conf` (any choice) | `extends` | `low-confidence` |
-| 4 | choice `new` | `new` | `judge` |
-| 5 | choice `extends` | `extends` | `judge` |
+| 1 | no lease | `new` | `no_lease` |
+| 2 | lease exists but `continuity` answer missing (that key failed or was dropped) | `extends` | `missing_answer` |
+| 3 | choice `new` | `new` | `judge` |
+| 4 | choice `extends` | `extends` | `judge` |
+| 5 | choice `same` and `answer.confidence < min_conf` | `extends` | `low_conf` |
 | 6 | choice `same` and `lease.stale` | `extends` | `stale` |
-| 7 | choice `same` and some path hit is not covered by the lease (§4.2) | `extends` | `path-hit-outside-lease` |
+| 7 | choice `same` and some path hit is not covered by the lease (§4.2) | `extends` | `path_hits_outside_lease` |
 | 8 | choice `same` | `same` | `judge` |
 
-Rule 3 applies the spec's "low-confidence continuity → extends" (§12.4) to `new` as well as `same`. §11.4 only mentions `same`; §12.4 states it generally. A low-confidence `new` as `extends` keeps the lease's pointers and adds new ones, which is the safe middle (D-10-1).
+Rules 3–8 are exactly 09 §4.6 step 1; the function lives here so 09 and the eval runner (16) share one implementation. Rule 2 is an addition: 09 doesn't say what happens when the continuity key alone fails, and `extends` is the safe middle. Low confidence only downgrades `same` (spec §11.4). Whether a low-confidence `new` should also become `extends`, as the general wording of spec §12.4 suggests, is Q-10-7.
 
 Rule 7 is the alignment with 09-router: a pasted stack trace that points outside the leased area is strong evidence of a new area, whatever Jev says about continuity. Path hits that are covered by the lease don't force anything.
 
@@ -223,7 +224,7 @@ Precisely:
 4. **Evict** from the tail until `len ≤ max_pointers` (`router.max_pointers`, default 12). Items added in this generation are never evicted, because the routed selection is itself ≤ `max_pointers`.
 5. **Capabilities.** `use' = lease.use ∪ routed.use`. `not_needed' = (lease.not_needed ∪ routed.not_needed) − use'`. A capability the lease marked `use` stays `use` even if call 1 now scores it ≤ `cap_skip` (same asymmetry as spec §11.4). Delta: `caps_use_added = routed.use − lease.use`, which includes a capability that moves from `not_needed` to `use`.
 6. **Delta** = `LeaseDelta(content_added=[s for s, _ in added], caps_use_added, evicted, subsumed)`. New `not_needed` capabilities are **not** announced mid-task (see 11-note: delta notes carry no skip line).
-7. If `content_added` and `caps_use_added` are both empty, the delta is **empty**: `generation` is **not** incremented and the selection and item metadata are left unchanged (only the step 8 fields are written), and the pipeline returns `status="routed", note=None` with `trace.delta_empty = true` and decision-log field `lease.delta_empty = true`. This answers "extends that yields nothing new": inject nothing (D-10-3).
+7. If `content_added` and `caps_use_added` are both empty, the delta is **empty**: `generation` is **not** incremented and the selection and item metadata are left unchanged (only the step 8 fields are written). The note is `None` (11 renders nothing for an empty delta). The status is whatever 09 decided: usually `no-candidates`, because 09 excludes leased items from the final-pass pool on `extends` (D-09-15), so "nothing new" means nothing eligible. The decision record gets `lease.delta_empty = true`. This answers "extends that yields nothing new": inject nothing (D-10-3).
 8. `stale = False`, `stale_reason = None`, `index_head = current`, `last_route_started_at = route start`, `last_used_at = now`, `last_request = request_text`, `task_request` unchanged.
 
 When `needs_context < thresholds.needs_context` and there are no path hits, the routed content is empty by 09's rules; the merge then only processes capabilities.
@@ -254,7 +255,7 @@ load(session_id, catalog):
   return LeaseSnapshot(key, lease', rev=lease.rev, report)
 ```
 
-`validate` runs on **every** load, not only when `index_head` changed. It's ≤ 12 lookups plus hash comparisons (≤ 1 ms against the SQLite cache), and it catches working-tree refreshes, which don't move `index_head` (D-10-2).
+`validate` runs on **every** load, not only when `index_head` changed, because working-tree refreshes don't move `index_head` (D-10-2). Short-circuit: if `lease.index_fp` equals the current `meta.content_fingerprint + config_fingerprint` (05), nothing can have changed and the lookups are skipped. Otherwise it's ≤ 12 lookups plus hash comparisons (≤ 1 ms against the SQLite snapshot), after which `index_fp` is updated in memory.
 
 | Finding for a leased content id | Effect |
 |---|---|
@@ -268,9 +269,20 @@ The validated lease is returned in memory. It's persisted at the next commit, so
 
 **Refresh-driven staleness (spec §10.3).** Because validation compares card hashes at load time, `surf refresh` doesn't need to find and rewrite lease files. `LeaseManager` still exposes nothing for refresh to call. This removes a cross-process write path (D-10-2). Directory cards change hash when any descendant's card changes, so a leased directory goes stale after most commits under it. The cost is one `extends` walk, which is acceptable.
 
-Stale + `extends`: the pipeline passes the stale-but-present content ids (`report.changed`) to 09 as **lease candidates**, inserted into the final-pass pool right after path hits. Ids that score below `thresholds.final` are removed from the lease (not announced). Ids that pass are re-selected (not announced unless they were remapped to a new path).
+Stale + `extends`: changed-but-present items **stay** in the lease. 09 excludes leased items from the final-pass pool (D-09-15), so they aren't re-judged, but they still act as expansion anchors. Removed items are already gone. The walk then finds renamed or new areas as additions. Re-judging changed items was considered and rejected: it would spend final-pass slots on items the agent already has (Q-10-6).
 
 ### 4.9 Commit and concurrency
+
+Which route outcomes write the lease (aligned with 09 §4.1 and D-09-17):
+
+| Route status | Lease action |
+|---|---|
+| `routed`, `no-context`, `no-candidates` | `commit` with the effective continuity (`new` replace / `extends` merge; empty content allowed) |
+| `lease-reuse` (`same`), `skipped` by the ack rule | `commit` as a touch |
+| `deadline`, `judge-unavailable`, `error`, `index-missing`, other `skipped` | none (a half route must not be reused by a later `same`) |
+
+09 calls `commit(session_id, continuity, request=…, selection, index_head)`. That's a thin wrapper that builds the `LeaseOutcome` and returns `CommitResult` (full lease selection + delta).
+
 
 Routing is not serialized: two prompts in the same session can route concurrently (MCP clients can do this; Claude Code normally can't). Only the final read-modify-write is locked.
 
@@ -322,7 +334,7 @@ commit(snap, outcome):
 | `lease.max_files` | int ≥ 10 | `500` | gc cap on lease files |
 | `lease.max_request_chars` | int 200–8000 | `2000` | stored `task_request` / `last_request` length (head + tail) |
 | `router.max_pointers` | int | `12` | eviction cap (owned by 09/13) |
-| `router.thresholds.<backend>.continuity_min_conf` | float | `0.60` | rule 3 in §4.1 |
+| `router.thresholds.<profile>.continuity_min_conf` | float | `0.60` | rule 5 in §4.1 |
 
 ## 6. Edge cases and failure behavior
 
@@ -342,7 +354,7 @@ commit(snap, outcome):
 | Extends with all 12 routed items new | All 12 kept, every older item evicted |
 | Path hit outside lease and Jev says `same` | Forced `extends` (rule 7) |
 | Ack prompt ("ok") with an idle-expired lease | `peek_active` false → not skipped → routes normally (no lease → `new`) |
-| Judge unavailable during call 1 with a lease | Status `judge-unavailable`, no note, lease touched (`last_used_at`), not changed |
+| Judge unavailable during call 1 with a lease | Status `judge-unavailable`, no note, lease untouched (09 D-09-17); it idles out normally |
 | Route deadline hit before selection | No commit (a partial selection must not replace a lease) |
 | Leased table dropped by a migration | Dropped on load, lease stale; next prompt is at least `extends` |
 | Session id with `/`, `..`, unicode | Hashed key (`h_…`) |
@@ -363,7 +375,7 @@ Imports: `lease/` depends on stdlib, `pydantic` and `surf.model` only.
 
 **Unit (pure logic, `tests/lease/test_logic.py`)**
 
-- `effective_continuity`: table-driven over all 8 rules, including a low-confidence `new` → `extends`, stale + `same` → `extends`, a covered path hit keeping `same`.
+- `effective_continuity`: table-driven over all 8 rules, including a low-confidence `new` staying `new`, stale + `same` → `extends`, a covered path hit keeping `same`; parity test against 09's trace `override` values.
 - `covers`: file-in-dir, dir-in-dir, prefix-flipped dir (`doc:docs/` vs `code:docs/`), migration alias pair, `src/a` must not cover `src/ab/x.ts` (dirs end in `/`).
 - `merge_extends`: ordering after 3 generations; eviction from the tail; re-selected item moves to front; directory subsumption; empty delta leaves `generation` unchanged; capability rules (use sticks, not_needed → use announced, new not_needed not announced).
 - `validate`: unchanged, changed hash, removed, remapped dir, removed capability.
@@ -380,7 +392,7 @@ Imports: `lease/` depends on stdlib, `pydantic` and `surf.model` only.
 **Integration / sequence (with 09 and the fixture judge)**
 
 - Spec §17.1 `s004` replayed: `new` → `same` (no note) → `extends` (delta contains `code:src/notifications/email/`) → `new` (full note).
-- Stale path: commit modifies a leased file between turns 1 and 2; turn 2 judged `same` → routed as `extends`; changed item re-scored in the final pass.
+- Stale path: commit modifies a leased file between turns 1 and 2; turn 2 judged `same` → routed as `extends`; changed item stays leased and isn't re-announced; a deleted leased file is dropped.
 - Claude Code adapter test (12): SessionStart `compact` deletes the lease; next prompt gets a full note.
 
 ## 9. Acceptance criteria
@@ -397,11 +409,11 @@ Imports: `lease/` depends on stdlib, `pydantic` and `surf.model` only.
 
 | Id | Spec says | We do | Why |
 |---|---|---|---|
-| D-10-1 | §11.4: only low-confidence `same` becomes `extends` | Any continuity answer below `continuity_min_conf` becomes `extends` (as §12.4's general rule states); a missing answer with a lease also → `extends` | §11.4 and §12.4 disagree; `extends` keeps the lease and still routes, so it's the safe middle for both errors |
+| D-10-1 | not specified | A missing continuity answer with a lease → `extends` | Safe middle; the spec only covers low confidence |
 | D-10-2 | §10.3: refresh marks leases stale | Staleness is detected at **load** by comparing stored card hashes against the catalog; refresh doesn't touch leases. `index_head` in the lease is informational | Removes a cross-process write path; also catches working-tree refreshes, which don't change `index_head` |
-| D-10-3 | §12.4: `extends` injects a delta note | A delta with no new content and no new `use` capability injects nothing (`status=routed`, `note=None`, `delta_empty`) | An empty "Also relevant" note is noise |
-| D-10-4 | §12.2 record | Adds `v`, `task_id`, `last_request`, `last_route_started_at`, `items` (gen/rank/hash per id), `stale_reason`, `rev` | Needed for ordering/eviction, hash-based staleness, concurrency and the previous-message fallback |
-| D-10-5 | §12.3: `path hits` not mentioned for `same` | Path hits not covered by the lease force `extends` | Pasted traces outside the leased area are strong new-area evidence (aligned with 09) |
+| D-10-3 | §12.4: `extends` injects a delta note | A delta with no new content and no new `use` capability injects nothing (`note=None`, `lease.delta_empty`; status per 09, usually `no-candidates`) | An empty "Also relevant" note is noise |
+| D-10-4 | §12.2 record | Adds `v`, `task_id`, `last_request`, `last_route_started_at`, `index_fp`, `items` (gen/rank/hash per id), `stale_reason`, `rev` | Needed for ordering/eviction, hash-based staleness, concurrency and the previous-message fallback |
+| D-10-5 | §12.3: `path hits` not mentioned for `same` | Path hits not covered by the lease force `extends` | Pasted traces outside the leased area are strong new-area evidence (same as 09 D-09-5) |
 | D-10-6 | §12.4 "newest first" | Defined as `(generation desc, rank asc, id asc)`; directories subsume covered files; tail eviction | The spec gives no ordering or tie-break |
 
 ### Open questions
@@ -411,5 +423,7 @@ Imports: `lease/` depends on stdlib, `pydantic` and `surf.model` only.
 | Q-10-1 | Should the delta note announce leased pointers that were deleted/renamed (a `gone:` line)? | No in v1; the walk re-finds renamed files as additions | Sequence eval: count of turns where the agent opens a deleted pointer |
 | Q-10-2 | Under `same`, should a newly `use`-scored capability produce a one-line capability delta? | No (log `caps_drift` only) | Capability accuracy on sequence turns; frequency of `caps_drift` in logs |
 | Q-10-3 | Is 45 min idle right for agent sessions with long tool runs? | 45 | Decision logs: distribution of gaps between prompts that Jev judged `same` |
-| Q-10-4 | Should the lease store redacted request text when `privacy.log_prompt_text = false`? It's needed for continuity. | Yes (cache is gitignored, redacted, ≤ 2,000 chars); document in the privacy statement | Privacy review (14) |
+| Q-10-4 | Should the lease store redacted request text when `privacy.log_prompt_text = false`? It's needed for continuity. | Yes (cache is gitignored, redacted per 14 D-14-7, ≤ 2,000 chars); document in the privacy statement | Privacy review (14) |
 | Q-10-5 | On `extends`, should the stored `task_request` be updated (e.g. appended) so continuity compares against the widened task? | No; keep the originating request (spec §11.4) plus `last_request` | Continuity accuracy on 3+ turn sequences (spec §25 Q6) |
+| Q-10-7 | Spec §12.4 says "low-confidence continuity → extends" in general; §11.4 and 09 apply it only to `same`. Should a low-confidence `new` also become `extends`? | No (follow §11.4 / 09) | Sequence eval: accuracy of `new` answers by confidence bucket |
+| Q-10-6 | Should changed-but-present leased items be re-judged in the final pass on a stale `extends` (at the cost of pool slots)? | No: they stay leased and act as anchors | Sequence eval with a commit between turns: pointer precision on the next turn |

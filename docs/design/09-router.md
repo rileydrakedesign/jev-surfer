@@ -3,7 +3,7 @@
 **Status:** draft for review
 **Spec sections:** §11 (all), §8.5 (expansion use), §11.9 (budgets), §12.4 (lease interplay), §14.3 (low confidence), §17.4 (attribution), §18.1 (decision record)
 **Depends on:** 00-foundations, 04-graph-edges (`graph/expand.py`), 05-catalog-store (tree/edge lookups), 07-judge, 08-path-matching, 10-lease, 11-note, 13-config, 14-security-privacy (redaction), 15-observability
-**Code:** `surf/route/pipeline.py`, `skip.py`, `call1.py`, `walk.py`, `final.py`, `select.py`, `surf/route/state.py` (new: judge-state construction and truncation), `surf/route/trace.py` (new: `RouteTrace`)
+**Code:** `surf/route/pipeline.py`, `skip.py`, `call1.py`, `walk.py`, `final.py`, `select.py`, `surf/route/state.py` (new: judge-state construction and truncation), `surf/route/trace.py` (new: `RouteTrace`), `surf/route/wordings.py` (new: shipped wording constants)
 
 ---
 
@@ -22,7 +22,7 @@ Given a prompt, produce a `RouteResult` (00 §3): a small selection of content s
 # route/pipeline.py
 @dataclass(frozen=True)
 class RouterContext:
-    catalog: CatalogReader          # 05: cards, children, files_under, edges, meta
+    catalog: CatalogReader          # 05 read API over .surf/cache/index.sqlite (D-05-5); never JSONL
     path_index: PathIndex           # 08
     judge: Judge                    # 07
     thresholds: Thresholds; calibrated: bool      # 07 §4.9
@@ -32,10 +32,14 @@ class RouterContext:
     decisions: DecisionLogger       # 15
     clock: Clock
 
+OnRouteDone = Callable[[RouteRequest, RouteResult, RouteTrace], None]
+
 async def route_async(req: RouteRequest, ctx: RouterContext, *, explain: bool = False,
-                      enabled: bool = True) -> RouteResult: ...    # never raises
+                      enabled: bool = True, on_route_done: OnRouteDone | None = None
+                      ) -> RouteResult: ...    # never raises
 def route(req: RouteRequest, ctx: RouterContext, *, explain: bool = False,
-          enabled: bool = True) -> RouteResult: ...                # asyncio.run wrapper
+          enabled: bool = True, on_route_done: OnRouteDone | None = None
+          ) -> RouteResult: ...                # asyncio.run wrapper
 
 # route/skip.py
 def check_skip(prompt: str, *, lease_exists: bool, enabled: bool, cfg: RouterConfig) -> SkipReason | None
@@ -61,11 +65,17 @@ def build_final(pool: list[PoolEntry], state: dict[str, str], cfg: RouterConfig)
 async def run_final(...) -> FinalOutcome
 
 # route/select.py
-def select(pool: list[PoolEntry], final: FinalOutcome, call1: Call1Outcome, *,
-           thresholds: Thresholds, cfg: RouterConfig, catalog: CatalogReader) -> SelectionOutcome
+class SelectParams(BaseModel):      # everything applied after the final pass
+    final: float; path_hit_floor: float; cap_use: float; cap_skip: float; needs_context: float
+    max_pointers: int; max_caps_use: int; max_caps_skip: int
+    collapse_min_files: int; collapse_max_dir_files: int
+
+def select(trace: RouteTrace, params: SelectParams) -> SelectionOutcome     # pure; no catalog, no judge, no clock
 ```
 
 Callers: `cli.py` (`surf route`), `adapters/claude_code.py`, `adapters/mcp_server.py` (awaits `route_async`), `eval/runner.py` (with `explain=True`).
+
+`on_route_done(req, result, trace)` is called exactly once per route, **after** the result is final and with the trace **even when `explain=False`** (15 §2 builds the decision record from it). Only `RouteResult.trace` is gated by `explain`. Exceptions raised by the callback are caught and warned once; they never change the result. The Claude Code adapter emits and flushes its stdout payload before its callback appends to the log (15).
 
 ---
 
@@ -115,7 +125,7 @@ class LowConfidence(StrEnum):
 | State key | Call 1 | Walk | Final | Source / limit |
 |---|---|---|---|---|
 | `request` | ✓ | ✓ | ✓ | redacted prompt, head+tail ≤ `router.request_max_tokens` (1,500) |
-| `project` | ✓ | ✓ | ✓ | `project.descriptor` or meta auto-descriptor, ≤ 200 chars |
+| `project` | ✓ | ✓ | ✓ | `project.descriptor` from config, else the auto-derived descriptor stored in `meta.json` (02 §4.10), ≤ 200 chars |
 | `previous_task` | ✓ if lease | – | – | lease `task_request`, redacted, ≤ `router.context_max_tokens` (300) |
 | `last_message` | ✓ if given | – | – | `RouteRequest.previous_message`, redacted, ≤ 300 tokens |
 | `location` | – | ✓ | – | breadcrumb `root › src › services`; schema root renders as `root › database schema` |
@@ -135,67 +145,85 @@ Keys are omitted (not empty) when absent. Key order is fixed as listed (fixture 
 | walk | `w:<id>` | Noul | `walk` |
 | final | `f:<id>` | Noul | `final` |
 
-Default wordings are the spec §11.4/§11.5/§11.7 texts with `{card}` replaced by the card's stored `card` string. The judge maps keys to opaque wire keys (07 §3.1).
+The shipped wordings are constants in `route/wordings.py` and **must equal the `shipped` entries of `bench/wordings.yaml`** (16 §3.6; a unit test enforces it). Initial values are the spec §11.4/§11.5/§11.7 texts; continuity is stored as `instructions` + `options` (same/extends/new descriptions). `router.wording.*` config overrides exist for experiments; eval's `--wording key=id` sets them. `{card}` is replaced by the card's stored `card` string. The judge maps keys to opaque wire keys (07 §3.1).
 
 ### 3.4 `RouteTrace` (`route/trace.py`)
 
-Built on every route (cheap); attached to `RouteResult.trace` only when `explain=True`. The decision record (15) is derived from it.
+Built on every route (cheap) and passed to `on_route_done`; attached to `RouteResult.trace` only when `explain=True`. It satisfies the field contract in 15-observability §3.3 (consumers: decision record, `--explain`, eval attribution 16 §4.6, offline re-selection 16 §4.8). Field names below are the contract names.
 
 ```python
-class ChildScore(BaseModel):
-    id: SurfaceId; p: float | None                     # None = unjudged (chunk failed / missing)
-    outcome: Literal["file", "flattened", "frontier", "dir_admit", "pruned", "beam_cut",
-                     "excluded_path_hit", "unjudged", "guard"]
+class WalkNode(BaseModel):                  # one per judged child (plus the root)
+    id: SurfaceId; parent: SurfaceId | None; depth: int
+    p: float | None                         # None = unjudged (chunk failed / missing key)
+    cum: float                              # parent cum × p
+    action: Literal["expand", "flatten", "candidate", "pruned", "guard",
+                    "skipped_path_hit", "beam_cut", "dir_admit", "deadline_admit", "unjudged"]
+    chunk_no: int
 
-class NodeTrace(BaseModel):
-    node: SurfaceId; depth: int; p_cum: float; chunks: int
-    children: list[ChildScore]; error: ErrorKind | None
-
-class WalkTrace(BaseModel):
-    mode: Literal["walk", "small_repo", "skipped_no_context", "skipped_lease", "none"]
+class WalkTraceT(BaseModel):
+    nodes: list[WalkNode]
+    levels: int; requests: int
+    dead_end_guard: bool; deadline_hit: bool; depth_cap_hit: bool
     speculative: Literal["used", "discarded", "off", "n/a"]
-    levels: list[list[NodeTrace]]
-    guard_fired_at: int | None; deadline_hit: bool
-    frontier_cut: list[SurfaceId]                      # nodes dropped by max_frontier
-    candidates: dict[SurfaceId, WalkCandidate]
+    frontier_cut: list[SurfaceId]           # dropped by max_frontier
+    latency_ms: int
 
-class SelectionTrace(BaseModel):
-    eligible: list[SurfaceId]; below_threshold: list[SurfaceId]
-    path_hits_below_floor: list[SurfaceId]; unjudged_dropped: list[SurfaceId]
-    redundant_dirs: list[SurfaceId]; collapsed: dict[SurfaceId, list[SurfaceId]]
-    diversity_swaps: list[tuple[SurfaceId, SurfaceId]]  # (added, displaced)
-    budget_cut: list[SurfaceId]
-    content: list[SurfaceId]; caps_use: list[SurfaceId]; caps_not_needed: list[SurfaceId]
+class Call1Trace(BaseModel):
+    needs_context: float | None
+    continuity: ChoiceA | None              # raw
+    continuity_effective: Continuity
+    override: Literal["no_lease", "low_conf", "stale", "path_hits_outside_lease"] | None
+    caps: dict[SurfaceId, float]
+    content: dict[SurfaceId, float]         # small mode only
+    failed_chunks: list[int]; latency_ms: int
+
+class PathHitT(BaseModel):
+    id: SurfaceId; strength: float; raw_token_index: int      # index into the prompt's token list, never the token
+
+class ExpansionT(BaseModel):
+    id: SurfaceId; score: float; via_kind: EdgeKind; via_anchor: SurfaceId; admitted: bool
+
+class PoolItem(BaseModel):                  # pre-truncation, rank order; also everything select() needs
+    id: SurfaceId; type: SurfaceType
+    source: Literal["path_hit", "walk", "flatten", "expansion", "small", "ambiguous_path", "dir_hit"]
+    rank: int; pre_score: float
+    path_hit_rank: int | None               # 08 order, None if not a hit
+    parent: SurfaceId | None                # for collapse / redundancy
+    parent_direct_files: int | None         # number of direct files in `parent` (collapse rule)
+    ancestors: list[SurfaceId]              # for the dir/descendant redundancy rule
 
 class RouteTrace(BaseModel):
-    route_id: str; status: RouteStatus; low_confidence: list[LowConfidence]
-    timings_ms: dict[str, int]         # skip, pathmatch, call1, walk, walk_l1..lN, expand, final, select, total
+    route_id: str; status: RouteStatus
+    mode: Literal["small", "walk", "flat"]
+    low_confidence: list[LowConfidence]
     skip_reason: SkipReason | None
-    path: PathMatchResult              # 08; raw mention text only when explain=True
-    call1: Call1Outcome | None
-    walk: WalkTrace | None
-    expansion: list[ExpansionHit]      # 04: id, score, anchor, kind, weight
-    pool: list[PoolEntry]              # pre-truncation, ranked; truncated flag set
-    final: FinalOutcome | None
-    selection: SelectionTrace | None
-    judge: JudgeUsageSummary           # 07 §3.3
+    call1: Call1Trace | None
+    path_hits: list[PathHitT]
+    path_candidates: list[SurfaceId]        # ambiguous (08)
+    walk: WalkTraceT | None
+    expansion: list[ExpansionT]             # admitted + top 20 rejected (score < threshold)
+    pool: list[PoolItem]                    # before truncation
+    pool_cut: list[SurfaceId]               # removed by max_candidates
+    excluded_by_lease: list[SurfaceId]      # extends only
+    final: dict[SurfaceId, float]; final_unjudged: list[SurfaceId]; final_latency_ms: int | None
+    above_threshold: list[SurfaceId]        # priority order
+    budget_cut: list[SurfaceId]
+    collapsed: dict[SurfaceId, list[SurfaceId]]
+    redundant_dirs: list[SurfaceId]; diversity_swaps: list[tuple[SurfaceId, SurfaceId]]
+    selected: Selection
+    lease: LeaseInfo; delta: list[SurfaceId] # 15 §3.1 LeaseInfo; additions on extends
+    judge: JudgeUsageSummary                # 07 §3.3
+    judge_requests: list[dict] | None       # only with --show-requests / eval record mode
     thresholds_profile: str; calibrated: bool
+    latency_ms: LatencyMs                   # {total, call1, walk, expand, final, overhead}
+    explain: ExplainExtras | None           # explain only: raw path mentions (08 trace), card texts
 ```
 
-**Attribution (used by `eval/attribution.py`, 16).** For a label `L` (surface id, or directory path satisfied by any descendant), the loss stage is the first matching row:
+Raw prompt text never enters the trace outside `explain` (raw path mentions in `ExplainExtras`), so the decision record can be built from it safely.
 
-| Stage | Condition in trace |
-|---|---|
-| `skipped` / `unavailable` / `deadline` / `error` | route status says so |
-| `continuity` | status `lease-reuse` and `L` not in the lease |
-| `gate` | status `no-context` |
-| `walk` | no pool entry satisfies `L`; trace also reports the deepest walk node on `L`'s path and its `p` (e.g. "pruned at `src/services/`, p = 0.21") |
-| `truncation` | pool entry exists, all satisfying entries `truncated` |
-| `final` | judged, all satisfying entries below threshold (or unjudged → `final_unjudged`) |
-| `budget` | eligible but in `budget_cut` |
-| satisfied | `L` in `selection.content`, or collapsed into a selected dir, or (dir label) a descendant selected |
+**Offline re-selection.** `select(trace, params)` reads only `trace.pool`, `trace.final`, `trace.final_unjudged`, `trace.call1` and `trace.path_hits`, so eval can sweep `final`, `path_hit_floor`, `max_pointers`, `cap_use`, `cap_skip` and the collapse parameters on stored traces without judge calls (16 §4.8). Raising `needs_context` offline is emulated by treating rows with `call1.needs_context < τ` and no path hits as `no-context`; lowering it isn't exact (the walk never ran) and 16 must not sweep downward offline.
 
-For directory labels the "furthest" stage over all descendants is reported.
+**Attribution.** 16 §4.6 owns the bucket rules (status, lease, gate, budget, final, truncation, walk sub-reasons). The trace provides every input: `budget_cut`, `final`, `pool_cut`, `walk.nodes[*].action`, `walk.depth_cap_hit`, `walk.deadline_hit` and rejected expansions.
 
 ---
 
@@ -241,6 +269,8 @@ stateDiagram-v2
 | routed | `routed` | full or delta note | `commit(continuity, content, caps)` |
 | any exception | `error` | none | untouched |
 
+`router.mode = "flat"` (ablation A0, 16 §3.5) replaces the whole call-1-then-walk branch after call 1 with: every content card from `catalog.content_cards()` (same card set as small-repo content), chunked by `chunk_size`, final wording, then `select`. Trace `mode="flat"`, `pool` = all cards.
+
 Every terminal writes one decision record. The whole body of `route_async` is inside the fail-open guard (00 §5); per-stage guards also wrap path matching and expansion so a bug there degrades that stage (empty result) instead of the route.
 
 ### 4.2 Deadlines (two budgets)
@@ -270,7 +300,7 @@ Order:
 
 ### 4.5 Step 2: call 1 (`call1.py`)
 
-**Questions**, in order: `continuity` (if a lease exists), `needs_context` (always, also in small-repo mode), `cap:<id>` for every capability card (sorted by id), then in small-repo mode `file:<id>` for every non-directory content card: `code_file`, `doc_file`, `db_table` (not `code_dir`/`doc_dir`/`db:*`/`mig:`, not path-hit files; order by churn desc, then id).
+**Questions**, in order: `continuity` (if a lease exists), `needs_context` (always, also in small-repo mode), `cap:<id>` for every capability card (sorted by id), then in small-repo mode `file:<id>` for every non-directory content card: `code_file`, `doc_file`, `db_table` excluding external-stub tables (not `code_dir`/`doc_dir`/`db:*`/`mig:`, not path-hit files; order by churn rank desc, then id).
 
 **Chunking.** `n` questions → `k = ceil(n / chunk_size)` balanced chunks (07 §4.2). `continuity` and `needs_context` are in chunk 0 only. Every chunk carries the full call-1 state (§3.2), so capability judgments on "ok, now fix it" still see the previous task. All chunks go out in one `ask_many`, concurrently with the speculative walk (§4.7).
 
@@ -286,7 +316,7 @@ Evaluated in order; `τ` = thresholds:
 2. `same` → cancel speculation; `lease-reuse`.
 3. `needs_context < τ.needs_context` and no path hits (tier-1 hits; ambiguous candidates don't count) → cancel speculation; `no-context`.
 4. `needs_context < τ.needs_context` with path hits → cancel speculation; skip the walk; pool = hits + ambiguous candidates + expansion (D-09-6).
-5. Small-repo mode (`meta.content_cards ≤ router.small_repo_cutoff`) → candidates = `{id: p for file:<id> with p ≥ τ.walk}` (`via="judged"`). Dead-end guard as in §4.8 step 5 over these answers. Go to expansion.
+5. Small-repo mode (`catalog.content_card_count() ≤ router.small_repo_cutoff`; the count excludes `mig:` cards and external-stub tables, per 02/05) → candidates = `{id: p for file:<id> with p ≥ τ.walk}` (`via="judged"`). Dead-end guard as in §4.8 step 5 over these answers. Go to expansion.
 6. Walk mode → §4.8 with the speculative level 1.
 
 Capability decisions (all non-`same` outcomes): `use` = `p ≥ τ.cap_use`, sorted by p desc, first `router.max_caps_use` (6); `not_needed` = `p ≤ τ.cap_skip`, sorted by p asc, first `router.max_caps_skip` (10). Everything else unmentioned.
@@ -329,7 +359,7 @@ async def run(first, needs_context, *, excluded, has_path_hits):
                 if k.is_leaf:                      # code_file, doc_file, db_table
                     put(cands, k.id, s, "judged" / "guard")
                 elif k.files_total <= cfg.flatten_at:
-                    for f in catalog.files_under(k.id):          # leaf descendants; tables for db:*
+                    for f in leaves(k.id):     # catalog.subtree_files(dir); catalog.children('db:*') for the schema root
                         if f.id not in excluded: put(cands, f.id, s * cfg.flatten_factor, "flattened")
                 elif last:
                     put(cands, k.id, s, "dir_admit")             # step 6
@@ -339,7 +369,7 @@ async def run(first, needs_context, *, excluded, has_path_hits):
     return WalkResult(cands, ...)
 ```
 
-1. **Level construction.** For each frontier node: children from the catalog (containment), minus `excluded`, sorted by churn desc (numeric churn from the card fields, dirs by subtree churn, tables by schema-ref degree; ties by id), split into balanced chunks of ≤ `chunk_size`. One `JudgeRequest` per chunk with state `{request, project, location}` and one `w:<child>` Noul each. All chunks of the level go out in one `ask_many`.
+1. **Level construction.** For each frontier node: children from `catalog.children(node)` (05; containment lives in the cache, not in `edges.jsonl`), minus `excluded`, sorted by churn rank desc (`high` > `med` > `low` > none, the card's `churn` field per 02 §4.7), then id, split into balanced chunks of ≤ `chunk_size`. One `JudgeRequest` per chunk with state `{request, project, location}` and one `w:<child>` Noul each. All chunks of the level go out in one `ask_many`.
 2. **Aggregate per node.** Answers from all chunks of the same node are merged before selection. (The spec pseudocode applies the beam per chunk, which would let a 120-child node expand 18 children; D-09-7.)
 3. **Threshold + beam** per node: `p ≥ τ.walk`, top `beam_max`. Children above threshold but beyond the beam are traced `beam_cut`.
 4. **Admission.** Leaves become candidates with cumulative score `p_cum × p`. Small directories (`files_total ≤ flatten_at`) are flattened at `× flatten_factor` (0.9). The schema root flattens to its tables when it has ≤ `flatten_at` tables. `put` keeps the max score per id.
@@ -352,19 +382,20 @@ async def run(first, needs_context, *, excluded, has_path_hits):
 
 ```python
 anchors = {h.id: h.strength for h in path_hits} | {c.id: c.score for c in walk_cands.values()}
-hits = graph.expand.expand(anchors, catalog.edges, threshold=τ.expand,
-                           tables_per_anchor=cfg.expand_tables_per_anchor)   # 04
+hits = graph.expand.expand(anchors, ctx.catalog, cfg.expand,                 # 04 §4.5; ExpandConfig from
+                           exclude=excluded_ids)                           # router.expand.* + thresholds.expand
+rejected = top 20 below-threshold neighbours (04 exposes them for the trace; see §10 Q-09-10)
 ```
 
-- Depth 1; kinds and `kind_factor` per spec §8.5 (04 owns). Directory anchors contribute only through `contains` to README/index files.
-- Tables reach the pool through `schema_ref` (file → table, at most `expand_tables_per_anchor` = 3 per anchor). They have `db:` cards, so they are judged in the final pass like anything else.
+- 04 owns everything about scoring: depth 1, `kind_factor`, traversal directions, `router.expand.max_per_anchor` (8, per kind), `max_total` (40), `enabled_kinds` (ablations A1–A4), `code:`→`mig:` canonicalisation. Edges are read through `CatalogReader.edges_from` (symmetric kinds are stored once; 05 returns both directions). Directory anchors contribute only through `contains` to README/index files.
+- Tables reach the pool through `schema_ref` (file → table, bounded by 04's `max_per_anchor`). They have `db:` cards, so they are judged in the final pass like anything else.
 - Migrations reach the pool via `defined_in` only from table anchors (a table hit, or tables from a flattened schema root). The "migration that added `shipped_at`" line in the note is attached by the note builder from `defined_in` edges of selected tables (11), not by the router (Q-09-7).
 - Ambiguous path candidates are not anchors.
 
 ### 4.10 Pool assembly and truncation
 
 1. Collect entries: tier 1 path hits (08 order), tier 2 walk / small-repo candidates (score desc), tier 3 ambiguous path candidates (08 order), tier 4 expansion (expand_score desc). Ties by id.
-2. Apply the `code:` → `mig:` alias mapping to every entry (§4.4.1).
+2. Apply the `code:` → `mig:` alias mapping to every entry (§4.4.1; `edges_from(id, [ALIAS])`).
 3. Dedupe by id, keeping the lowest tier (and its score).
 4. On `extends`, mark entries already in the lease content `excluded="lease"` and drop them (they can't be additions; D-09-15). They still served as expansion anchors.
 5. Drop `root:`, `db:*` and capability ids defensively.
@@ -378,6 +409,8 @@ hits = graph.expand.expand(anchors, catalog.edges, threshold=τ.expand,
 - Timeout from `route_deadline`. All requests failed with `DEADLINE`/timeout after the deadline → `deadline`; all failed otherwise → `judge-unavailable`. One of two failed → its ids are `unjudged` and the route is `FINAL_PARTIAL`.
 
 ### 4.12 Step 6: selection (`select.py`)
+
+`select(trace, params)` is a pure function (16 §4.8, Q-16-8). Before calling it the pipeline has written everything it needs into the trace: `pool` items carry `type`, `path_hit_rank`, `parent`, `parent_direct_files` and `ancestors` (looked up from the catalog once, during pool assembly); `final`/`final_unjudged` hold the final-pass result; `call1.caps` the capability probabilities. Steps 1–5 below use only those fields; the internal `PoolEntry` (with `tier`) is projected to `PoolItem` for the trace.
 
 1. **Eligibility.** Non-path-hit entries: `p ≥ τ.final`. Path hits: `p ≥ τ.path_hit_floor` (0.2). Unjudged entries (including unjudged path hits) are not eligible (consistent with Q-F7: nothing un-judged reaches the note).
 2. **Redundancy.** If a directory and any of its descendants are both eligible, drop the directory (the file is more specific; a dir label is still satisfied by the file).
@@ -415,7 +448,7 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `small_repo_cutoff` | int | 60 | `meta.content_cards` (spec count incl. dirs) |
+| `small_repo_cutoff` | int | 60 | against `catalog.content_card_count()` (02/05 definition: excludes `mig:` and external stubs) |
 | `flatten_at` | int | 40 | |
 | `flatten_factor` | float | 0.9 | |
 | `chunk_size` | int | 40 | ≤ `judge.max_questions_per_request` |
@@ -427,7 +460,8 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 | `max_pointers` | int | 12 | |
 | `max_caps_use` / `max_caps_skip` | int | 6 / 10 | new |
 | `collapse_min_files` / `collapse_max_dir_files` | int | 4 / 8 | |
-| `expand_tables_per_anchor` | int | 3 | passed to 04 |
+| `mode` | `auto` \| `flat` | `auto` | 16 §3.5 (A0) |
+| `expand.*` | | | owned by 04 §5 (`max_per_anchor` 8, `max_total` 40, `enabled_kinds`, `kind_factors`, `index_names`) |
 | `walk_deadline_ms` | int | 2000 | replaces the walk meaning of `deadline_ms` |
 | `route_deadline_ms` | int | 3000 | replaces `[router] deadline_ms`; 13 accepts `deadline_ms` as a deprecated alias |
 | `min_level_ms` / `min_final_ms` | int | 400 / 300 | |
@@ -437,8 +471,8 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 | `final_max_request_tokens` | int | 6000 | split rule §4.11 |
 | `skip.ack_max_words` | int | 4 | |
 | `skip.ack_words` | list[str] | §4.3 | |
-| `wording.{walk,final,capability,continuity,needs_context}` | str | spec texts | `{card}` placeholder |
-| `wording.continuity_options` | dict | spec texts | `same`/`extends`/`new` descriptions |
+| `wording.{walk,final,capability,continuity,needs_context}` | str | `route/wordings.py` constants (= `shipped` in 16's wordings.yaml) | `{card}` placeholder; override for experiments only |
+| `wording.continuity_options` | dict | constants | `same`/`extends`/`new` descriptions |
 | `pathmatch.*` | | | 08 §5 |
 
 `[router.thresholds.<profile>]` (07 §4.9 lookup; `jev` defaults shown):
@@ -579,6 +613,7 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 | D-09-18 | Collapse rule "parent dir with ≤ 8 files" | Direct files; one pass; dir dropped when a descendant is also eligible | Precise, deterministic |
 | D-09-19 | Path hits kept unless final < 0.2 | Unjudged path hits (failed chunk) dropped | Consistent with Q-F7 |
 | D-09-20 | Walk state = request, project, location | Unchanged, and call-1 context keys are never added to walk state | Keeps speculation valid before continuity is known |
+| D-09-21 | Selection is part of the pipeline | `select(trace, params)` is pure over the trace; the trace is always passed to `on_route_done` | Offline threshold sweeps (16) and decision records (15) without re-routing |
 
 ### Open questions
 
@@ -593,3 +628,5 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 | Q-09-7 | Migration line for selected tables built by the note from `defined_in` edges | Yes (11) | 11 review |
 | Q-09-8 | On `deadline`, emit capability lines or nothing? | Capability lines (spec) | Agent behavior study |
 | Q-09-9 | Collapse on direct vs recursive file count | Direct | Eval precision on dir-collapsed notes |
+| Q-09-10 | 15 §3.3 wants the top 20 **rejected** expansion neighbours in the trace; 04's `expand()` returns admitted candidates only | 04 adds `expand(..., collect_rejected: int = 0)` returning `(admitted, rejected)` | 04 review |
+| Q-09-11 | Expansion keys: 16 §3.5 proposes `router.expand_kinds`, 04 §5 defines `router.expand.enabled_kinds` | Use 04's `router.expand.enabled_kinds`; 16's ablation overlays should be renamed | 13 review |

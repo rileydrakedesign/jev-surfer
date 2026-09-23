@@ -83,8 +83,8 @@ root_hint   := " (paths from repo root)"
 
 | Kind | Header text | Lines allowed | lowconf | fallback |
 |---|---|---|---|---|
-| `FULL` | `Likely relevant — open as needed, nothing is preloaded:` | code, schema, docs, use, skip | if `low_confidence` | always |
-| `DELTA` | `Also relevant for this part of the task:` | code, schema, docs, use | if `low_confidence` | never (spec §14.2) |
+| `FULL` | `Likely relevant — open as needed, nothing is preloaded:` | code, schema, docs, use, skip | if `low_confidence` **and** ≥ 1 content pointer is rendered | always |
+| `DELTA` | `Also relevant for this part of the task:` | code, schema, docs, use | if `low_confidence` **and** ≥ 1 content pointer is rendered | never (spec §14.2) |
 | `CAPS_ONLY` | `No specific project files flagged; capabilities for this task:` | use, skip | never | always |
 
 ## 4. Behavior
@@ -101,11 +101,17 @@ root_hint   := " (paths from repo root)"
 | `schema_root`, `root:` | never selected; dropped defensively with a debug log | |
 | capability in `use` / `skip` | use / skip | `display_capability(card)` |
 
-Items are grouped per line **in the input order** (selection priority from 09: path hits → final score desc → id asc; for deltas, `LeaseDelta.content_added` order). Input order is deterministic, so the note is deterministic; we don't re-sort alphabetically because order carries importance. Capability lines are ordered by the call-1 score desc, then id asc (09 passes them in that order).
+Items are grouped per line **in the input order** (selection priority from 09: path hits → final score desc → id asc; for deltas, `LeaseDelta.content_added` order). Input order is deterministic, so the note is deterministic; we don't re-sort alphabetically because order carries importance. Capability lines are ordered by the call-1 score desc, then id asc, and are already capped by 09 at `router.max_caps_use` (6) and `router.max_caps_skip` (10) (D-09-16). The note builder doesn't re-cap; the line cap in §4.5 still applies.
 
 Lines appear in the fixed order code, schema, docs, use, skip. Empty lines are omitted.
 
 ### 4.2 Schema line with migrations
+
+The router doesn't select migrations for tables (09 §4.9); the note builder attaches them. The migration group is built as follows:
+
+1. For each rendered table, in line order, take the table card's `last_changed_in` migration, or `created_in` if it has never been altered (03 table card fields). This is the "migration that added `shipped_at`" in the spec §1.1 example: the latest schema change to a table is the most likely one to matter. Only `mig:` targets count; snapshot sources (`schema.prisma`, `schema.rb`) have no `mig:` card and are skipped.
+2. Add any `mig:` ids (or aliased `code:` migration ids) that are in the selection itself, in input order.
+3. Dedupe, keep the first `note.max_migrations` (default 2), and drop the rest silently (they're discoverable through `surface_info`).
 
 ```
 schema: orders · shipments (migration: supabase/migrations/20260611_add_shipments.sql)
@@ -113,7 +119,7 @@ schema: orders (migrations: db/001_init.sql · db/014_orders_status.sql)
 schema: (migration: supabase/migrations/20260611_add_shipments.sql)       # migrations only
 ```
 
-Tables first in input order, then one parenthesized group containing all selected migrations in input order. `migration:` is singular for one item and plural otherwise.
+Tables first in input order, then one parenthesized group with the migrations from the rule above. `migration:` is singular for one item and plural otherwise. In a `DELTA` note, a migration already shown for the same table in this task isn't known to the note builder (it's stateless), so it may be repeated. That's accepted: it's one short parenthetical.
 
 ### 4.3 Display names
 
@@ -225,6 +231,8 @@ Any change to the header texts, labels, separators, fallback or low-confidence w
 | `note.show_skip` | bool | `true` | `false` removes skip lines entirely (for users who distrust advisory skips) |
 | `note.ascii_only` | bool | `false` | `—` → `-`, `·` → `|` |
 | `note.root_hint` | bool | `true` | add "(paths from repo root)" when cwd ≠ root |
+| `note.max_migrations` | int 0–5 | `2` | §4.2; `0` disables the migration group |
+| `router.max_caps_use` / `router.max_caps_skip` | int | `6` / `10` | applied by 09 before rendering |
 
 ## 6. Edge cases and failure behavior
 
@@ -240,6 +248,8 @@ Any change to the header texts, labels, separators, fallback or low-confidence w
 | Very long path (> `max_line_chars`) | Own line, never split |
 | Capability both `use` and `skip` (caller bug) | `use` wins; `skip` entry dropped; warning logged |
 | Table in non-default schema | `billing.invoices` |
+| Selected table with no `mig:` history (Prisma/Rails snapshot source) | Table rendered, no migration group |
+| `low_confidence` but only capability lines render | No low-confidence line (09 §4.13) |
 | Caller passes >12 content items | Rendered subject to the line cap; no silent re-budgeting (budget is 09's job) |
 | Exception inside `render` | Pipeline's guard turns it into `status=error`, `note=None` (00 §5) |
 
@@ -272,6 +282,7 @@ Any change to the header texts, labels, separators, fallback or low-confidence w
 | D-11-3 | §14.3 "≤ 15 lines" with no overflow rule | Wrapping at 160 chars, deterministic drop order (skip → content → use) and a `(+N more not shown)` marker | Needed to enforce the cap |
 | D-11-4 | §14.2 delta lists "only additions" | Delta can include newly `use` capabilities but never `skip` lines | Mid-task skip advice is risky and costs more than it saves (spec §11.4 asymmetry) |
 | D-11-5 | not specified | Root hint when the agent's cwd is a subdirectory | Relative paths are otherwise ambiguous |
+| D-11-6 | §1.1 / §14.1: the note shows "the migration that added `shipped_at`" | The note shows each selected table's latest migration (`last_changed_in`, else `created_in`), at most 2 | Column-level intent isn't knowable without a model; the latest change is a deterministic proxy |
 
 ### Open questions
 

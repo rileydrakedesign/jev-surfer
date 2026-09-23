@@ -3,7 +3,7 @@
 **Status:** draft for review
 **Spec sections:** §15 (all), §11.2 (control commands, disabled routing), §12.5 (session identity), §10.1 (git hooks, SessionStart trigger), §18.2 (`surf stats`), §19.1 (init privacy table)
 **Depends on:** 00-foundations, 05-catalog-store, 06-refresh (what `surf refresh` does; this doc owns hook *installation*), 07-judge (breaker state for `status`/`doctor`), 09-router (`route()`), 10-lease, 11-note, 13-config, 14-security-privacy, 15-observability (`--explain`, `stats`), 16-evaluation (`surf eval`)
-**Code:** `surf/cli.py`, `surf/runtime.py` (new), `surf/control.py` (new), `surf/adapters/claude_code.py`, `surf/adapters/_cc_transcript.py` (new), `surf/adapters/mcp_server.py`, `surf/adapters/instructions.py`, `surf/adapters/git_hooks.py`, `surf/adapters/_jsonfile.py` (new; safe JSON settings editing), `surf/install/manifest.py` (new)
+**Code:** `surf/cli.py`, `surf/runtime.py` (new), `surf/control.py` (new), `surf/adapters/claude_code.py`, `surf/adapters/_cc_transcript.py` (new), `surf/adapters/mcp_server.py`, `surf/adapters/instructions.py`, `surf/adapters/git_hooks.py` (installation logic owned by 06 §4.8; called from here), `surf/adapters/_jsonfile.py` (new; safe JSON settings editing), `surf/install/manifest.py` (new)
 
 ---
 
@@ -17,7 +17,7 @@ Everything between the engine (`route()`) and the outside world: the commands pe
 | Claude Code hooks: `UserPromptSubmit`, `SessionStart`, `SessionEnd`, optional `Stop` | Push adapters for Codex, OpenCode, Cursor (v2) |
 | MCP server: `route_context`, `surface_info`, `surf_status`; stdio and local HTTP | Hard MCP tool pruning |
 | Instruction snippet management | Writing user-level harness configs by default (`~/.codex`, `~/.claude`) |
-| Git hook installation incl. husky / lefthook / pre-commit coexistence | Refresh algorithm itself (06) |
+| Orchestrating git hook installation (the hook block, manager handling and its manifest are 06 §4.8) | Refresh algorithm and freshness checks (06) |
 | `surf init`, `surf uninstall`, `surf doctor`, `surf status/on/off/reroute` | `surf eval` internals (16), `surf stats` internals (15) |
 
 ## 2. Interfaces
@@ -79,14 +79,14 @@ DisabledBy = Literal["env", "project", "session", "judge-null"]
 
 `<key>` uses the lease key rule (10 §3.3). Session control files are garbage-collected with leases (idle > `lease.idle_minutes` × 4, i.e. 3 h by default).
 
-### 3.2 Install manifest (`.surf/cache/install.json`)
+### 3.2 Install manifest (`<git-common-dir>/surf/install.json`)
 
 ```python
 class InstalledItem(BaseModel):
-    kind: Literal["claude_hooks", "mcp_config", "snippet", "git_hook", "git_exclude", "surf_gitignore"]
+    kind: Literal["claude_hooks", "mcp_config", "snippet", "git_exclude", "surf_gitignore"]   # git hooks: 06 manifest
     path: str                        # repo-relative (or "<git-dir>/hooks/post-commit")
     created: bool                    # surf created the file
-    backup: str | None               # .surf/cache/backups/<name>.<utc>.bak
+    backup: str | None               # <git-common-dir>/surf/backups/<name>.<utc>.bak
     sha256_after: str                # file hash right after surf wrote it
     detail: dict[str, Any] = {}
 
@@ -97,7 +97,7 @@ class InstallManifest(BaseModel):
     items: list[InstalledItem]
 ```
 
-The manifest is per clone and **optional**: uninstall works without it by recognizing surf-owned entries by marker (§4.10). It adds two things: deleting files surf created, and byte-exact restore when a file hasn't changed since install.
+The manifest sits next to 06's git-hook manifest (`<git-common-dir>/surf/manifest.json`), so it survives deletion of `.surf/cache/`. In a non-git project it falls back to `.surf/cache/install.json`. It is per clone and **optional**: uninstall works without it by recognizing surf-owned entries by marker (§4.10). It adds two things: deleting files surf created, and byte-exact restore when a file hasn't changed since install.
 
 ### 3.3 `--json` output envelope
 
@@ -148,7 +148,7 @@ The Claude Code adapter matches the **whole** prompt (trimmed, case-insensitive)
 | `surf reroute` | expire lease | block, reason "surf: task lease cleared; your next prompt will be routed as a new task" |
 | `surf reroute: <text>` | expire lease, route `<text>` as `new` | not blocked; note injected as usual |
 
-Blocking means Claude Code doesn't send the control prompt to the model, which is what the user wants for a control command (D-12-4). Anything that doesn't match exactly is routed normally, so a prompt like "surf off the old API" is unaffected.
+Blocking means Claude Code doesn't send the control prompt to the model, which is what the user wants for a control command (D-12-3). Anything that doesn't match exactly is routed normally, so a prompt like "surf off the old API" is unaffected.
 
 ### 4.4 Claude Code adapter
 
@@ -157,7 +157,7 @@ Blocking means Claude Code doesn't send the control prompt to the model, which i
 | Hook | Matcher | Handler |
 |---|---|---|
 | `UserPromptSubmit` | — | control commands (§4.3), otherwise route and inject |
-| `SessionStart` | none (all sources) | per source: `startup`/`resume` → background refresh + `gc`; `clear`/`compact` → expire lease + background refresh |
+| `SessionStart` | none (all sources) | `clear`/`compact` → expire lease; then, for every source, `ensure_fresh` (06) + lease `gc` |
 | `SessionEnd` | — | expire the session's lease; delete the session control file |
 | `Stop` | — | optional (`delivery.claude_code.stop_hook`, default off): log implicit feedback (spec §15.4) |
 
@@ -236,7 +236,7 @@ def read_prev_user_text(payload: Mapping, current_prompt: str, *,
 
 #### 4.4.5 `SessionStart`, `SessionEnd`, `Stop`
 
-- **SessionStart**: if `source in {"clear","compact"}`: `leases.expire(sid, reason)`. Then spawn `surf refresh --changed --background --quiet` (detached; `start_new_session=True`; stdio to `DEVNULL`) unless a refresh finished less than `refresh.session_start_min_interval_s` (default 60) ago. Then `leases.gc()`. No stdout. Total ≤ 150 ms. Refresh runs in the background instead of being time-boxed inline (D-12-1). Routes that arrive during it use the previous index; the catalog swap is atomic (05), and lease validation catches changed pointers (10 §4.8).
+- **SessionStart**: if `source in {"clear","compact"}`: `leases.expire(sid, reason)` first (cheap, so it can't be lost to a timeout). Then `refresh.ensure_fresh(wait_ms=refresh.session_start_wait_ms)` (06 §4.5): when fresh (the common case) this returns in ≤ 150 ms. When stale it triggers a background refresh and **waits** up to 3 s, and the refresh keeps running after the wait (D-06-3). Then `leases.gc()`. No stdout. Routes that arrive during a refresh read the previous immutable SQLite snapshot (05), and lease validation catches changed pointers (10 §4.8).
 - **SessionEnd**: expire the lease and the session control file.
 - **Stop** (off by default): read the transcript tail for `Read`/`Grep` tool uses since the last routed prompt and append `{"kind":"feedback","route_id","opened":[ids…]}` to the decision log (15). v1 only records; nothing consumes it.
 
@@ -319,7 +319,7 @@ No input. Output = `StatusReport` (§4.12.4), with the lease section for the cal
 - **stdout discipline (stdio):** stdout belongs to JSON-RPC. At startup `sys.stdout` is replaced by a guard that raises on any stray write outside the SDK's writer; logging goes to stderr.
 - **Hot reload:** before each tool call, `stat` `meta.json` and `config.toml` (mtime_ns + size). If changed, reopen the catalog / reload config between calls. A failed reload keeps the previous state and logs once.
 - **Concurrency:** `route_context` runs `Runtime.route` in a worker thread (`anyio.to_thread`) so concurrent calls don't block the event loop; the judge concurrency cap (07) is shared across calls. Lease commits are safe under concurrency (10 §4.9).
-- **Freshness:** on the first tool call of a server process, spawn the same background refresh as SessionStart.
+- **Freshness:** `ensure_fresh(wait_ms=0)` (06) at server start and whenever a new session id appears; it never blocks a tool call.
 - **Never** executes project code, calls other MCP servers, or runs live MCP listing; it only reads `.surf/` and calls the judge.
 - **Session end:** when a connection-scoped session closes, `expire(reason="session-end")` its `mcp-…` lease.
 
@@ -370,30 +370,16 @@ Update algorithm (per file):
 
 Removal: delete the block and the single blank line that precedes it (only if that line is blank). If the file is now empty or whitespace-only **and** the manifest says surf created it, delete it. An owned `.mdc` file is deleted.
 
-### 4.7 Git hooks, installation side (`adapters/git_hooks.py`)
+### 4.7 Git hooks (installation owned by 06 §4.8)
 
-Hooks: `post-commit`, `post-merge`, `post-checkout`, `post-rewrite` (spec §10.1). Refresh semantics are 06's.
+06 owns the hook block (`# >>> surf >>>` … `# <<< surf <<<`), the per-manager handling (native hooks, `core.hooksPath`, husky, lefthook via `lefthook-local.yml`, pre-commit via `<hook>.legacy`) and its manifest. This doc only orchestrates it:
 
-Block:
-
-```sh
-# surf:begin (managed by surf; remove with `surf uninstall`)
-if command -v surf >/dev/null 2>&1; then surf refresh --changed --background --quiet >/dev/null 2>&1 || true; fi
-# surf:end
-```
-
-`--background` makes `surf` detach and return in < 100 ms, so git operations never wait (06 owns the lockfile guard).
-
-| Situation (detected in this order) | Action |
+| Flow | Call into `adapters/git_hooks.py` (06) |
 |---|---|
-| `core.hooksPath` or worktree | hooks dir = `git rev-parse --git-path hooks` (handles both) |
-| husky (`.husky/` exists and `package.json` references husky) | append the block to `.husky/<hook>` (create with `#!/usr/bin/env sh` if missing). Committed; shown in the init plan |
-| lefthook (`lefthook.yml`, `lefthook.yaml`, `.lefthook.yml`) | write `lefthook-local.yml` entries `<hook>: commands: surf-refresh: run: surf refresh --changed --background --quiet`. Uses lefthook's local override file, so no committed YAML is edited. Print "run `lefthook install`" |
-| existing raw hook, shell shebang (`sh`, `bash`, `zsh`, `dash`, `env sh`) | insert the block **right after the shebang line**. This survives scripts that end in `exec …`, like pre-commit's generated hooks |
-| existing raw hook, non-shell shebang (python, node) | skip that hook; warning with manual instructions |
-| no hook file | create `#!/bin/sh` + block, mode 0755 |
-
-Idempotent: an existing block is replaced in place. Uninstall removes the block. A file that is then only a shebang and whitespace, and that surf created, is deleted.
+| `surf init` plan (§4.8 step 3) | `detect_hook_setup(root)` → `plan_install(setup)`; each `HookAction` is listed in the plan, and committed files (husky) are called out |
+| `surf init` apply (step 7) | `apply(actions)` unless `--no-git-hooks` or `refresh.git_hooks = false` |
+| `surf uninstall` | `uninstall(root)` |
+| `surf doctor` (`git.hooks`) | `verify(root)` → one check result per `HookProblem` |
 
 ### 4.8 `surf init`
 
@@ -405,9 +391,9 @@ surf init [--harness claude,mcp,cli] [--shared] [--live-mcp NAME…] [--no-snipp
 1. **Root.** `git rev-parse --show-toplevel`; non-git → cwd with a warning ("no co-change edges"). Refuse `$HOME` or `/` unless `--force`.
 2. **Detect** (no writes): languages, migration formats, agent configs, harnesses (`claude`: `.claude/` or `CLAUDE.md` or `claude` on PATH; `cursor`: `.cursor/`; `vscode`: `.vscode/`), hook managers, an existing `.surf/` (re-init = upgrade, idempotent), commit count and shallowness.
 3. **Plan.** Print what will be indexed (counts per type, excludes), each file that will be created or modified, and the privacy table (spec §19.1, from 14). `--dry-run` prints the plan (`--json`: `surf.init_plan/1`) and exits 0. Otherwise confirm (`[y/N]`; `--yes` skips). Declining → exit 7.
-4. **Write `.surf/`**: `config.toml` only if absent (detected values + commented defaults, 13 §4.6); `.surf/.gitignore` with `cache/`, `logs/`, `config.local.toml`.
-5. **Build** the full index (progress on stderr). Failure → exit 1; integrations are not installed.
-6. **MCP purposes.** For each static MCP server with no listing and no `capabilities.describe` entry: prompt for one line (Enter skips). Write them into `config.toml` by targeted text insertion under `[capabilities.describe]`, preserving comments (13 §4.7). Rebuild capability cards only.
+4. **Write `.surf/`**: `config.toml` only if absent (detected values + commented defaults, 13 §4.6); `.surf/.gitignore` with `cache/`, `logs/`, `config.local.toml`. With the default `index.commit_catalog = false` (05/06, Q-06-1), the catalog lives in `.surf/cache/`, and `config.toml` plus `.surf/.gitignore` are the only files surf adds to the tree. A committed baseline is an explicit, separate step (`surf index --baseline`), which init mentions but never runs.
+5. **Build** the full index into `.surf/cache/` (progress on stderr). Failure → exit 1; integrations are not installed. The derived project descriptor (02 §4.10, stored in `meta.json`) is printed so the user can override it with `project.descriptor`.
+6. **Live MCP listing and purposes.** Live listing is **off by default** (D-14-5): only servers named with `--live-mcp NAME` (or already in `capabilities.live_mcp`) are spawned, each after a confirmation that shows the exact command, and never under `--yes` unless named explicitly. Then, for each static MCP server with no listing and no `capabilities.describe` entry: prompt for one line (Enter skips). Write them into `config.toml` by targeted text insertion under `[capabilities.describe]`, preserving comments (13 §4.7). Rebuild capability cards only.
 7. **Integrations**, each independent (a failure is reported and the others continue): git hooks → Claude Code hooks (if `claude` harness) → MCP registration (if `mcp`) → instruction snippets (unless `--no-snippet`). Write the manifest.
 8. **Doctor** (§4.11). Errors are shown; they don't undo the install.
 9. **Smoke route** (unless `--no-smoke`, or no judge key): three prompts generated deterministically from the catalog: (a) `"where is <title of the highest-churn doc> described?"`, (b) `"how does <highest-churn code dir name> work?"`, (c) a two-frame synthetic stack trace using the top-churn code file's path (exercises path matching). Routed without a session; notes and latencies printed.
@@ -421,7 +407,7 @@ Exit: 0 success (warnings allowed), 1 build failed, 2 usage, 5 config invalid, 7
 surf uninstall [--yes] [--purge] [--keep KIND…] [--json]
 ```
 
-Order: Claude Code hooks (both settings files) → MCP entries (only `surf` entries whose command is `surf`) → instruction blocks → git hook blocks / `lefthook-local.yml` entries / husky blocks → `.git/info/exclude` line → `.surf/cache/` and `.surf/logs/`. With `--purge` (asks for confirmation unless `--yes`), delete `.surf/` entirely, including the committed catalog and config.
+Order: Claude Code hooks (both settings files) → MCP entries (only `surf` entries whose command is `surf`) → instruction blocks → git hooks (06 `uninstall`) → `.git/info/exclude` line → `.surf/cache/` and `.surf/logs/`. The manifests in `<git-common-dir>/surf/` are deleted last. With `--purge` (asks for confirmation unless `--yes`), delete `.surf/` entirely, including the committed catalog and config.
 
 Per file:
 
@@ -431,7 +417,7 @@ Per file:
 | unchanged, surf created it | delete |
 | changed since install, or no manifest | remove surf-owned entries only (markers / command match); keep everything else; if now empty and created by surf → delete |
 
-This refines the spec's "restores it": a blind restore would destroy edits made after install (D-12-2). Backups are kept in `.surf/cache/backups/` until the cache is deleted, and `uninstall` prints their paths first.
+This refines the spec's "restores it": a blind restore would destroy edits made after install (D-12-1). Backups in `<git-common-dir>/surf/backups/` are kept (not deleted by uninstall), and `uninstall` prints their paths.
 
 ### 4.10 Ownership markers (for manifest-less uninstall and `doctor`)
 
@@ -441,8 +427,7 @@ This refines the spec's "restores it": a blind restore would destroy edits made 
 | MCP config | key `surf` with command `surf` and first arg `mcp` |
 | Snippet | `<!-- surf:begin… -->` … `<!-- surf:end -->` |
 | `.cursor/rules/surf.mdc` | file name + block markers inside |
-| Git hooks / husky | `# surf:begin` … `# surf:end` |
-| lefthook | command key `surf-refresh` in `lefthook-local.yml` |
+| Git hooks / husky / lefthook | owned by 06 §4.8 (`# >>> surf >>>` … `# <<< surf <<<`; `surf-refresh` in `lefthook-local.yml`) |
 
 ### 4.11 `surf doctor`
 
@@ -456,11 +441,11 @@ surf doctor [--live] [--strict] [--json]
 | `config.parse` | config files parse and validate (13) | error |
 | `config.unknown_keys` | unknown keys (typos) | warn |
 | `index.present` | `catalog.jsonl`, `edges.jsonl`, `meta.json` exist; `schema_version` supported | error |
-| `index.fresh` | `meta.index_head == HEAD`; working tree changes since last refresh | warn |
+| `index.fresh` | 06 `check_freshness(deep=True)` | warn |
 | `index.cache` | SQLite cache present and consistent with JSONL digest (else rebuilt) | info |
 | `index.size` | catalog > 20 MB → suggest `index.commit_catalog = false` (spec §9.5) | warn |
 | `git.history` | < 200 commits or shallow clone → suggest `git fetch --unshallow` (spec §8.2.6) | warn |
-| `git.hooks` | each of the 4 hooks contains the surf block and is executable (or the manager entry exists) | warn |
+| `git.hooks` | 06 `verify(root)`: blocks present and executable, or manager entries present; manual steps pending | warn |
 | `claude.hooks` | settings entries present; `<CMD>` resolves and runs `surf-hook --version` in < 1 s | warn (error if harness selected at init) |
 | `claude.local_ignored` | `settings.local.json` is ignored by git | warn |
 | `mcp.config` | `surf` entry present in registered files; `surf mcp --check` starts and lists 3 tools | warn |
@@ -488,8 +473,8 @@ Exit: 0 when there are no errors (warnings allowed); 4 when any error; with `--s
 | Command | Purpose | Key flags | Exit codes |
 |---|---|---|---|
 | `surf init` | index + install (§4.8) | see §4.8 | 0, 1, 2, 5, 7 |
-| `surf index` | full build / verify | `--full` (ignore cache), `--check` (compare with committed, no write), `--json` | 0; 3 not initialized; 4 `--check` mismatch; 5; 1 |
-| `surf refresh` | incremental (06) | `--changed`, `--background`, `--quiet`, `--timeout-ms N`, `--json` | 0 (also when another refresh holds the lock: `"skipped":"busy"`); 3; 5; 1 |
+| `surf index` | full build / verify (06) | `--full`, `--check [--trust-cochange] [--allow-lag]`, `--baseline` (write the committed baseline), `--json` | 0; 3 not initialized; 4 `--check` mismatch or stale; 9 cannot verify (e.g. shallow clone); 5; 1 |
+| `surf refresh` | incremental (06) | `--changed` \| `--full`, `--background`, `--reason R`, `--quiet`, `--json`; hook args pass through | 0 (also when another refresh holds the lock: `"skipped":"busy"`); 3; 5; 1 |
 | `surf route "<prompt>"` | route one prompt | `--session ID`, `--previous TEXT`, `--stdin` (prompt from stdin; also when the prompt arg is `-`), `--json`, `--explain`, `--judge NAME`, `--no-lease`, `--strict` | **0 for every `RouteStatus`** (fail-open); 2 usage; with `--strict`: 3 for `index-missing`, 8 for `judge-unavailable`, 1 for `error` |
 | `surf mcp` | MCP server (§4.5) | `--http`, `--host`, `--port`, `--allow-remote`, `--check` (start, self-list tools, exit) | 0; 1 on bind/startup failure; 3 |
 | `surf eval` | evaluation (16) | `--set dev|test`, `--judge`, `--ablate`, `--json`, `--record` | 0; 4 regression gate failed (spec §17.7); 8 judge unavailable |
@@ -513,7 +498,8 @@ Exit code table:
 | 4 | a check failed (`index --check`, `doctor`, eval gate) |
 | 5 | configuration invalid |
 | 7 | aborted by the user |
-| 8 | judge unavailable where it's required (`route --strict`, `eval`, `doctor --live` reports via 4) |
+| 8 | judge unavailable where it's required (`route --strict`, `eval`; `doctor --live` reports via 4) |
+| 9 | cannot verify (`index --check` without enough git history; 06 §4.7) |
 
 #### 4.12.3 `surf route --json` (`surf.route/1`), also the MCP structured output
 
@@ -580,7 +566,8 @@ class RouteOutput(BaseModel):
 | `delivery.mcp.port` | int | `8765` | |
 | `delivery.instructions.files` | list[str] \| null | `null` (auto, §4.6) | explicit target list |
 | `delivery.control_commands` | bool | `true` | in-prompt `surf off` etc. |
-| `refresh.session_start_min_interval_s` | int | `60` | debounce for SessionStart / MCP-start refresh |
+| `refresh.session_start_wait_ms` | int | `3000` | SessionStart wait bound (06) |
+| `refresh.check_interval_s` | int | `60` | CLI cheap freshness-check throttle (06) |
 | `router.skip.ack_words` | list[str] | spec list | used by the hook fast path |
 | `router.route_deadline_ms` | int | `3000` | counted from process start (§2.1) |
 | `lease.*` | | | 10 §5 |
@@ -615,7 +602,7 @@ class RouteOutput(BaseModel):
 |---|---|
 | `surf-hook prompt` fast exits (no project, disabled, control command, ack skip) | ≤ 60 ms / 100 ms wall, stdlib + `tomllib` only |
 | `surf-hook prompt` import overhead before routing (pydantic, httpx, sqlite3, surf core; no typer/rich/mcp) | ≤ 200 ms / 300 ms |
-| `surf-hook session-start` | ≤ 150 ms (spawn + gc) |
+| `surf-hook session-start` | ≤ 150 ms when fresh; ≤ `session_start_wait_ms` + 50 ms when stale (06) |
 | `surf route` CLI overhead over engine (typer import) | ≤ 250 ms |
 | MCP tool-call overhead over engine | ≤ 10 ms |
 | Transcript read | ≤ 30 ms (hard budget) |
@@ -636,7 +623,7 @@ The spec's latency targets (§1.2, §11.9) are **engine** targets. Hook wall tim
 - Claude settings: missing file, `{}`, existing unrelated hooks, existing surf hooks from an older version, invalid JSON, 4-space and tab indent. Install twice → identical bytes; local ↔ shared switch; uninstall restore when untouched; uninstall after the user edits another key (only surf removed).
 - MCP config: create, merge, conflicting `surf` entry.
 - Snippets: each target file, CRLF, BOM, malformed markers, v1 → v2 upgrade, removal, created-file deletion, symlinked AGENTS.md.
-- Git hooks: none, existing sh hook, pre-commit generated hook ending in `exec`, python hook (skipped), husky, lefthook, `core.hooksPath`, worktree.
+- Git hooks: tested in 06; here only the init/uninstall/doctor orchestration against a fake `git_hooks` module.
 
 **MCP server** — SDK in-memory client: tool list and schemas match the checked-in snapshot; `route_context` with and without `session_id` (lease continuity across two calls in one session); `surface_info` by id/path/not-found; hot reload after `meta.json` changes; a stray `print` in stdio mode is caught by the guard test.
 
@@ -659,16 +646,14 @@ The spec's latency targets (§1.2, §11.9) are **engine** targets. Hook wall tim
 
 | Id | Spec says | We do | Why |
 |---|---|---|---|
-| D-12-1 | §10.1 / §15.4: SessionStart refreshes inline, time-boxed to 3 s | SessionStart spawns a detached background refresh and returns in ≤ 150 ms | Blocking session start for 3 s is visible to users; the atomic catalog swap and lease validation make a background refresh safe |
-| D-12-2 | §15.4: `surf uninstall` restores the backed-up settings file | Byte-exact restore only when the file is unchanged since install; otherwise surgical removal of surf-owned entries | A blind restore would destroy user edits made after install |
-| D-12-3 | §15.7 lists only `surf` | Separate `surf-hook` console script with a stdlib-only fast path | Typer/rich/pydantic imports would add 150–300 ms to every prompt |
-| D-12-4 | §11.2: control commands are "handled directly" | In Claude Code, a control-only prompt is **blocked** (`decision: block`) with a status reason; `surf reroute: <text>` routes `<text>` as `new` | Sending "surf off" to the model wastes a turn |
-| D-12-5 | §15.3: snippet goes into whichever instruction files exist | CLAUDE.md is skipped when Claude Code hooks are installed; AGENTS.md is created if no instruction file exists | Avoids double routing; AGENTS.md is the cross-harness default |
-| D-12-6 | §15.4 hook table has UserPromptSubmit, SessionStart, Stop | Adds `SessionEnd` (expire lease) | Lease cleanup without waiting for idle expiry |
-| D-12-7 | §15.7 command list | Adds `surf stats` (spec §18.2), `surf config`, hidden `surf hook`; adds `--strict`, `--stdin`, `--previous`, `--no-lease`, `--dry-run`, `--purge` | Needed for scripting, debugging and safe uninstall |
-| D-12-8 | §10.1: add entries to hook managers | lefthook via `lefthook-local.yml`; pre-commit and raw hooks via a block inserted after the shebang | No committed YAML editing; survives `exec` at the end of generated hooks |
-| D-12-9 | §15.2: MCP `route_context` output `{status, note, selection, continuity, route_id}` | Same fields plus `note_kind`, `continuity_reason`, `low_confidence`, `session_id`, `lease`, `latency_ms`, and a text content block with the note | The agent reads text; scripts read structure |
-| D-12-10 | not specified | `surf off` scopes: project (per clone, gitignored) and session; team-wide off is `judge.backend = "null"` | Nothing in `cache/` is committed |
+| D-12-1 | §15.4: `surf uninstall` restores the backed-up settings file | Byte-exact restore only when the file is unchanged since install; otherwise surgical removal of surf-owned entries | A blind restore would destroy user edits made after install |
+| D-12-2 | §15.7 lists only `surf` | Separate `surf-hook` console script with a stdlib-only fast path | Typer/rich/pydantic imports would add 150–300 ms to every prompt |
+| D-12-3 | §11.2: control commands are "handled directly" | In Claude Code, a control-only prompt is **blocked** (`decision: block`) with a status reason; `surf reroute: <text>` routes `<text>` as `new` | Sending "surf off" to the model wastes a turn |
+| D-12-4 | §15.3: snippet goes into whichever instruction files exist | CLAUDE.md is skipped when Claude Code hooks are installed; AGENTS.md is created if no instruction file exists | Avoids double routing; AGENTS.md is the cross-harness default |
+| D-12-5 | §15.4 hook table has UserPromptSubmit, SessionStart, Stop | Adds `SessionEnd` (expire lease) | Lease cleanup without waiting for idle expiry |
+| D-12-6 | §15.7 command list | Adds `surf stats` (spec §18.2), `surf config`, hidden `surf hook`; adds `--strict`, `--stdin`, `--previous`, `--no-lease`, `--dry-run`, `--purge` | Needed for scripting, debugging and safe uninstall |
+| D-12-7 | §15.2: MCP `route_context` output `{status, note, selection, continuity, route_id}` | Same fields plus `note_kind`, `continuity_reason`, `low_confidence`, `session_id`, `lease`, `latency_ms`, and a text content block with the note | The agent reads text; scripts read structure |
+| D-12-8 | not specified | `surf off` scopes: project (per clone, gitignored) and session; team-wide off is `judge.backend = "null"` | Nothing in `cache/` is committed |
 
 ### Open questions
 

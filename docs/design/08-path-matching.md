@@ -2,8 +2,8 @@
 
 **Status:** draft for review
 **Spec sections:** §11.3 (also §8.5 anchor strength, §17.1 `stack_trace` category, §21 "incidental path hits")
-**Depends on:** 00-foundations (ids, `norm_path`, F2/F3), 05-catalog-store (the `paths` table in `index.sqlite`), 09-router (consumer)
-**Code:** `surf/route/pathmatch.py`, `surf/route/pathindex.py` (new: `PathIndex` protocol + SQLite and trie implementations)
+**Depends on:** 00-foundations (ids, `norm_path`, F2/F3), 05-catalog-store (`CatalogReader.id_for_path`, `ids_for_suffix`, `ids_for_basename` over `index.sqlite`), 09-router (consumer)
+**Code:** `surf/route/pathmatch.py`, `surf/route/pathindex.py` (new: `PathIndex` protocol + catalog-backed and in-memory trie implementations)
 
 ---
 
@@ -46,9 +46,9 @@ class PathIndex(Protocol):
         # catalog paths that are a segment-suffix of the query, longest first
     def with_suffix(self, rsegs: Sequence[str], *, fold: bool, limit: int) -> tuple[list[IndexedPath], int]: ...
         # catalog paths that end with the query; returns (up to `limit` paths, total count)
-    def extensionless_basenames(self) -> frozenset[str]: ...
+    def has_basename(self, name: str) -> bool: ...                # known extensionless names (Makefile, ...)
 
-class SqlitePathIndex(PathIndex): ...      # production: reads index.sqlite, zero build cost per process
+class CatalogPathIndex(PathIndex): ...     # production: wraps 05's CatalogReader lookups; zero build cost per process
 class TriePathIndex(PathIndex): ...        # tests, eval, long-lived MCP server; built from the catalog in memory
 ```
 
@@ -132,23 +132,17 @@ Two queries, both walking the query's reversed segments from the root:
 | `suffixes_of(q)` | descend while segments match; collect every terminal passed | catalog paths that are a suffix of `q`; longest = deepest terminal |
 | `with_suffix(q)` | descend all of `q`; if fully consumed, the node's subtree | catalog paths ending with `q`; count from the subtree counter |
 
-**Production implementation (`SqlitePathIndex`).** The hook is a fresh process per prompt, so building a trie of 20k paths (~40 ms) on every prompt is wasted work. 05-catalog-store adds a table to `index.sqlite`:
+**Production implementation (`CatalogPathIndex`).** The hook is a fresh process per prompt, so building a trie of 20k paths (~40 ms) on every prompt is wasted work. Production uses the lookups 05-catalog-store already provides on `index.sqlite` (its `paths` and `suffixes` tables, 05 §3); path matching adds no table of its own and never reads JSONL:
 
-```sql
-CREATE TABLE paths (
-  rpath      TEXT PRIMARY KEY,   -- reversed segments joined by '/': "ship.ts/fulfillment/src"; dirs end with '/' stripped, flag below
-  rpath_fold TEXT NOT NULL,      -- casefold(rpath)
-  id         TEXT NOT NULL,
-  is_dir     INTEGER NOT NULL,
-  basename   TEXT NOT NULL
-) WITHOUT ROWID;
-CREATE INDEX paths_fold ON paths(rpath_fold);
-```
+| `PathIndex` method | Built on (05 `CatalogReader`) |
+|---|---|
+| `suffixes_of(q)` (files) | `id_for_path("/".join(q[-k:]))` for `k = len(q) … 1`, longest first (≤ ~12 point lookups) |
+| `suffixes_of(q)` (dirs) | `id_for_path("/".join(q[-k:]) + "/")` for the same `k` (dir hits only via row 1 of §4.4) |
+| `with_suffix(q)` | `ids_for_suffix("/".join(q))` (files only; every segment-aligned file suffix is a row in 05's `suffixes` table) |
+| `fold=True` | the same calls with `casefold=True` |
+| known extensionless names | `ids_for_basename(name)` for each name in the fixed list of §4.1 row 17 |
 
-- `suffixes_of(q)`: for `k = len(q) … 1`, point lookups `rpath = join(q[:k])` (≤ number of query segments, typically ≤ 12). Hits collected longest-first.
-- `with_suffix(q)`: `rpath = r OR (rpath >= r || '/' AND rpath < r || '0')` (`'0'` sorts right after `'/'`) with `LIMIT ambiguous_max + 1`, plus `COUNT(*)` of the same range (index-only).
-- `fold=True`: same queries on `rpath_fold`.
-- A file and a dir can't share a path, so `rpath` is unique.
+Directories are therefore never TAIL/BASENAME matches, only full-suffix matches (`src/fulfillment/` or `/app/src/fulfillment`), which is the conservative choice for directory mentions.
 
 `TriePathIndex` implements the same protocol in memory; both must pass the full corpus (§8.1).
 
@@ -180,7 +174,7 @@ CREATE INDEX paths_fold ON paths(rpath_fold);
 | 14 | QUOTED | `` `([^`\n]{1,512})` ``, `"([^"\n]{1,512})"`, `'([^'\n]{1,512})'` containing `/` or `\` or a dotted extension | only way to get a path with spaces outside PY/.NET |
 | 15 | GENERIC | `(?<![\w@/\\.-])(?P<p>(?:[A-Za-z]:)?[\\/]?(?:P+[\\/])*P+\.[A-Za-z0-9]{1,10})(?P<pos>:\d+(?::\d+)?\|\(\d+(?:,\d+)?\))?` | any `seg/seg.ext`, bare `name.ext` |
 | 16 | GENERIC-DIR | `(?<![\w@/\\.-])(?P<p>(?:P+/){1,}P*/?)` with ≥ 2 segments or a trailing `/` | directory mentions (`src/fulfillment/`) |
-| 17 | GENERIC-NOEXT | bare token equal to a member of `index.extensionless_basenames()` (e.g. `Makefile`, `Dockerfile`, `Procfile`), or `seg/…/<that name>` | |
+| 17 | GENERIC-NOEXT | bare token (or `seg/…/<name>`) where `name` is in the fixed list `Makefile`, `GNUmakefile`, `Dockerfile`, `Containerfile`, `Procfile`, `Gemfile`, `Rakefile`, `Justfile`, `Vagrantfile`, `Jenkinsfile`, `Brewfile`, `Caddyfile`, `LICENSE`, `CODEOWNERS` and `index.has_basename(name)` | |
 
 Path char class `P = [\w.\-+@~\[\]()$%!=,#&]` (`#` only mid-segment; a trailing `#L12` is treated as a fragment in normalization). Unicode letters are included via `\w`. Spaces are **not** in `P`: an unquoted path containing a space is not recognized (D-08-3).
 
@@ -346,7 +340,7 @@ Strengths (1.0 / 0.9 / 0.8, fold × 0.9) are module constants, not config: chang
 | Migration path pasted | `code:` hit; router maps to `mig:` |
 | Path of an excluded/secret file | no match |
 | Path escaping the repo (`../../other-repo/src/x.ts`) | `..` resolved lexically → `other-repo/src/x.ts`; matches only if this repo has that suffix (then it's likely the same layout; accepted risk) |
-| Catalog index missing `paths` table (old cache) | `SqlitePathIndex` rebuilds the table from the catalog once (05), or falls back to `TriePathIndex` |
+| Catalog cache missing or stale | `open_catalog` rebuilds it or returns None (05); None → router `index-missing` before path matching |
 | Regex error / unexpected exception | pipeline guard: path matching returns empty result, route continues (fail open per stage, 09 §4.1) |
 
 ---
@@ -359,7 +353,6 @@ Strengths (1.0 / 0.9 / 0.8, fold × 0.9) are module constants, not config: chang
 | Typical prompt with a 15-frame stack trace | ≤ 3 ms (≤ 15 queries × ≤ 12 point lookups + range scans on SQLite) |
 | 256 KB log, 500 distinct mentions | ≤ 40 ms |
 | `TriePathIndex` build (tests, MCP server) | ≤ 60 ms, ≤ 30 MB |
-| SQLite `paths` table size | ≈ 2 × catalog path bytes |
 
 ---
 
@@ -380,7 +373,7 @@ cases:
     hits: [{id: "code:src/fulfillment/ship.ts", class: suffix, strength: 1.0, lines: [88]}]
 ```
 
-Every case runs against **both** `SqlitePathIndex` and `TriePathIndex`. Minimum corpus (≥ 120 cases); representative rows:
+Every case runs against **both** `CatalogPathIndex` (on a cache built by 05 from the layout) and `TriePathIndex`. Minimum corpus (≥ 120 cases); representative rows:
 
 | # | Group | Input (abridged) | Expected |
 |---|---|---|---|
@@ -450,7 +443,7 @@ Every case runs against **both** `SqlitePathIndex` and `TriePathIndex`. Minimum 
 - For any catalog path `p` and random decoration (absolute prefix from a set, scheme, `:L:C`, `(L,C)`, wrapper punctuation, backslashes, URL-encoding of bracket chars), `match_paths` returns a hit with `id(p)` whenever `p`'s basename-with-2-segments suffix is unique.
 - `normalize` is idempotent on its own output.
 - Result is independent of mention order except `frame_rank`/`first_offset` fields.
-- Sqlite and trie implementations return identical results on random layouts.
+- Catalog-backed and trie implementations return identical results on random layouts.
 
 ### 8.3 Performance tests
 
@@ -482,7 +475,7 @@ Benchmarks for §7 rows on a synthetic 20k-path layout; CI fails on > 2× regres
 | D-08-6 | "Prefer non-test, non-framework frames" | Framework frames dropped before lookup; tests demoted but one test slot reserved | Framework paths aren't in the catalog and only produce false basename matches; failing tests are often the point |
 | D-08-7 | Silent on case | Case-insensitive fallback only when the case-sensitive pass finds nothing | Windows/macOS traces |
 | D-08-8 | Match on prompt text | Match on the raw prompt before redaction | Redaction destroys hash-like path segments; output is ids only, so nothing leaks |
-| D-08-9 | Suffix structure unspecified | SQLite reversed-path table in production, in-memory trie in tests/MCP | The hook is a fresh process per prompt; building a trie each time is wasted work |
+| D-08-9 | Suffix structure unspecified | Production uses 05's SQLite `paths`/`suffixes` lookups; an in-memory reverse-segment trie is the reference implementation for tests | The hook is a fresh process per prompt; building a trie each time is wasted work |
 
 ### Open questions
 

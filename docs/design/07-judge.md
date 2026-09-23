@@ -86,7 +86,7 @@ class JudgeResponse(BaseModel):
 
 class ErrorKind(StrEnum):
     TIMEOUT = "timeout"; CONNECT = "connect"; HTTP_5XX = "http_5xx"; RATE_LIMITED = "rate_limited"
-    HTTP_4XX = "http_4xx"; AUTH = "auth"; MALFORMED = "malformed"; TOO_LARGE = "too_large"
+    HTTP_4XX = "http_4xx"; AUTH = "auth"; MALFORMED = "invalid_response"; TOO_LARGE = "too_large"
     BREAKER_OPEN = "breaker_open"; NO_KEY = "no_key"; DEADLINE = "deadline"
     CANCELLED = "cancelled"; NULL_BACKEND = "null_backend"; FIXTURE_MISS = "fixture_miss"
 
@@ -242,17 +242,19 @@ Key = `backend|provider|model`. Timestamps are wall clock (UTC ISO), because mon
 
 ### 3.5 Fixture store
 
-```
-<fixture_dir>/                     # tests/fixtures/judge/<set>/ in the surf repo; .surf/eval/recordings/ in user repos
-  answers.jsonl                    # one record per (model, state, question), sorted by key
+Format agreed with 16-evaluation §3.7 (07 owns it). One file per (repo, split, backend, model): `bench/fixtures/<repo>/<split>/<backend>-<model>.jsonl` for surf's own benchmark, `.surf/cache/eval-fixtures/…` in user repos (gitignored: records are derived from prompts), `tests/fixtures/judge/…` for unit tests. One line per recorded **request**, file sorted by `key`:
+
+```jsonc
+{"key": "sha256:…",                           // request-level key (§4.10)
+ "backend": "jev", "model": "jev-1.13.0", "profile": "jev",
+ "answers": {"file:code:src/a.ts": {"p": 0.81},
+             "continuity": {"choice": "new", "probs": {"same": 0.04, "extends": 0.06, "new": 0.9}, "confidence": 0.9}},
+ "qkeys": {"file:code:src/a.ts": "sha256:…", "continuity": "sha256:…"},   // question-level keys
+ "latency_ms": 412, "input_tokens": 1830,
+ "request": null}                              // full redacted request only with --record-requests
 ```
 
-```json
-{"key": "sha256:…", "model": "jev-1.13.0", "profile": "jev",
- "answer": {"p": 0.83}, "tokens": 31}
-```
-
-Optional debug sidecar `requests.jsonl` (off by default; `--record-requests`) stores the canonical state and question text per key. It is the only place raw prompts could land on disk, which is why it is opt-in (14).
+`request` is the only place prompt text could land on disk, which is why it's opt-in and never written under `bench/` (14, 16 §4.10).
 
 ---
 
@@ -402,26 +404,28 @@ Model-qualified tables (`[router.thresholds."jev:jev-1.14.0"]`) let a model upgr
 
 **`null` (`null.py`).** `availability() = Availability(ok=False, reason=NULL_BACKEND)`; `ask` raises `NULL_BACKEND`. No network, no breaker file writes. The router maps it to `judge-unavailable` with `reason="null-backend"` (the kill switch of spec §19.2).
 
-**`fixture` (`fixture.py`).** Wraps an optional inner judge; mode from `judge.fixture.mode` or `SURF_FIXTURE_MODE`:
+**`fixture` (`fixture.py`).** `FixtureJudge(path, *, mode, miss, simulate_latency, inner)`; mode from `judge.fixture.mode`, overridable by `SURF_FIXTURE_MODE` and `surf eval --fixture-mode`:
 
 | Mode | Hit | Miss |
 |---|---|---|
-| `replay` (default in tests, CI) | answer from store, `latency_ms = 0`, tokens from record | the whole request raises `FIXTURE_MISS` (tests fail loudly; eval counts it) |
-| `record` | ignored; always calls inner judge | calls inner judge and appends |
-| `record-missing` | from store | calls inner judge for **only the missing questions**, appends |
+| `replay` (tests, CI) | request-level hit → answers; else question-level fallback: if **every** question's qkey is in the store, assemble the response (counted `assembled`) | `miss="fail"` → `FIXTURE_MISS` (eval aborts listing the first 10 misses); `miss="null"` → behaves like the `null` backend for that request and the row is marked |
+| `append` (regeneration default) | from store (request-level, then assembled) | inner live judge for the whole request; appended; existing entries never modified, so unchanged requests keep their old answers |
+| `rewrite` | ignored | everything re-recorded from empty (model pin bump) |
 
-**Keying.** One record per question, not per request (D-07-3):
+**Keying** (both keys use `canonical_json = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` over NFC-normalized strings, and hash exactly the redacted state and questions the adapter would send):
 
 ```
-key = "sha256:" + sha256(canonical_json({
-        "model": model,                              # "jev-1.13.0"
-        "state": state,                              # dict, keys sorted
-        "q": {"type": ..., "instructions": ..., "options": {...sorted}}
-      }))
-canonical_json = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False) on NFC-normalized strings
+key  = "sha256:" + sha256(canonical_json({"backend", "model", "state", "questions"}))   # caller keys included
+qkey = "sha256:" + sha256(canonical_json({"backend", "model", "state", "key", "question"}))
 ```
 
-The caller's question key, `purpose`, provider and chunking are **excluded**, so re-chunking, changing `beam_max` or reordering questions still replays. A request replays only if every question hits. `answers.jsonl` is rewritten sorted by key on close (deterministic diffs). Store loading is lazy and indexed in a dict; a 50k-record store loads in < 200 ms.
+`purpose`, provider, retries and wire keys are excluded. The question-level fallback lets re-chunking and beam/frontier changes replay as long as each individual question (same state) was recorded before (D-07-3). It assumes answers don't depend on co-batched questions (Q-07-2).
+
+**Latency replay.** With `simulate_latency=True` (eval default), replay advances the injected clock by the record's `latency_ms` (for an `ask_many` batch: the max over its requests; assembled responses use the max over their source records). Deadline behavior in replay therefore follows the recording (16 §4.4 clock). Unit tests use `simulate_latency=False` (latency 0).
+
+**Profile.** The record's `profile` is the fixture judge's `threshold_profile` (§4.9). A store mixing profiles is rejected at load.
+
+Store loading is lazy, indexed in two dicts (key, qkey); a 50k-record store loads in < 200 ms. Files are rewritten sorted by key on close (deterministic diffs).
 
 ---
 
@@ -450,9 +454,11 @@ Owned by 13-config; consumed here.
 | `judge.local.base_url` | str | `"http://127.0.0.1:8080"` | `systemone-local` |
 | `judge.llm.base_url`, `.model`, `.key_env` | str | none, required | `llm` |
 | `judge.llm.allow_routing` | bool | false | |
-| `judge.fixture.mode` | enum | `"replay"` | env `SURF_FIXTURE_MODE` overrides |
-| `judge.fixture.dir` | path | `.surf/eval/recordings` | |
-| `judge.fixture.inner` | enum | `"jev"` | backend used in record modes |
+| `judge.fixture.mode` | enum | `"replay"` | `replay` \| `append` \| `rewrite`; env `SURF_FIXTURE_MODE` overrides |
+| `judge.fixture.miss` | enum | `"fail"` | `fail` \| `null` (16 uses `eval.fixture_miss`) |
+| `judge.fixture.simulate_latency` | bool | true | |
+| `judge.fixture.path` | path | `.surf/cache/eval-fixtures/` | 16 passes explicit paths for `bench/` |
+| `judge.fixture.inner` | enum | `"jev"` | live backend used by `append`/`rewrite` |
 
 Keys come only from env (spec §16); names per §3.2. `make_judge` is the only function that reads env.
 
@@ -480,7 +486,7 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 | `llm` backend selected for routing without opt-in | `make_judge` raises config error; `surf route` exits with message, hook fails open |
 | Fixture miss in `replay` | `FIXTURE_MISS`; eval reports the miss count and fails CI if > 0 |
 | Provider returns usage in an unknown field | `estimated=True`; no failure |
-| Duplicate question text with different caller keys | both asked (wire keys differ); fixture store holds one record, both keys answered from it |
+| Duplicate question text with different caller keys | both asked (wire keys differ); separate qkeys (caller key is part of the qkey) |
 | Request not redacted (`redacted=False`) to a network backend | `ValueError` before any I/O |
 
 ---
@@ -515,7 +521,7 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 | Key map | caller keys with `:`, `[`, spaces, unicode round-trip |
 | Ledger | tokens from provider vs estimated; cost math; cancelled tokens counted |
 | Threshold lookup | model-qualified > backend > builtin > uncalibrated fallback |
-| Fixture | key canonicalization (dict order, NFC); per-question hit across re-chunked requests; `record-missing` only asks missing questions; sorted rewrite is byte-stable |
+| Fixture | key/qkey canonicalization (dict order, NFC); request-level hit; assembled hit across re-chunked requests; partial qkey coverage → miss; `miss=null` behaviour; `append` never mutates existing lines; `simulate_latency` advances the clock by the batch max; sorted rewrite is byte-stable |
 | null | no network (transport asserts zero calls) |
 | llm | schema fallback path; coarse probabilities parsed; Choice confidence = max |
 
@@ -554,7 +560,7 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 |---|---|---|---|
 | D-07-1 | Sync `Judge.ask/ask_many(..., timeout_ms)` returning mappings (§13.1) | Async protocol + `SyncJudge` facade; `ask_many` returns per-request `JudgeResponse \| JudgeError`; timeout from `CallCtx.deadline` | Speculative walk needs cancellation; partial chunk failure must not discard the successful chunks; one deadline object per route (00 §5) |
 | D-07-2 | Judge client = `typesafe-sdk-python` (pinned) + thin httpx adapters (§22.1) | httpx for every provider at runtime; the SDK is a dev-only dependency used by the conformance test | One wire codec for all providers (isolation), async unknown for the SDK, import cost in a per-prompt hook process. Revisit if the SDK is async, light and exposes the gateways (Q-07-1) |
-| D-07-3 | Fixture judge "replays recorded responses" (§13.2) | Per-question records keyed by `(model, state, question)` | Threshold/beam/chunk sweeps (A8) replay without new live calls; request-level keys would miss on any re-chunking. Assumes questions are independent given state (Q-07-2) |
+| D-07-3 | Fixture judge "replays recorded responses" (§13.2) | Request-level records with question-level keys (`qkeys`) as a fallback, `append`/`rewrite` modes and recorded-latency replay (adopts 16's Q-16-3) | Beam/chunk/frontier changes (A8) replay without new live calls; latency replay keeps deadline behavior deterministic. Assumes questions are independent given state (Q-07-2) |
 | D-07-4 | Breaker "after 3 consecutive failures" (§13.3) | Counted per batch, persisted in `.surf/cache/judge_state.json`, AUTH opens for 600 s | The hook is a fresh process per prompt; per-request counting would open the breaker on one bad route |
 | D-07-5 | Retry on 5xx or timeout | Also retry once on connect errors and on 429 when `Retry-After` fits the deadline; never on other 4xx or malformed | Transient classes only; deterministic failures don't improve on retry |
 | D-07-6 | Thresholds per backend (§13.1) | Per `threshold_profile`, optionally model-qualified (`jev:jev-1.13.0`) | Model upgrades shift calibration |
@@ -565,7 +571,7 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
 | Q-07-1 | Use the official SDK at runtime? | No (D-07-2) | SDK inspection in Phase 0: async support, import time, gateway support |
-| Q-07-2 | Are Jev answers independent of co-batched questions? If not, per-question fixtures drift from live | Assume independent | Phase 0: ask the same question in two different batches ×20; if |Δp| > 0.02 median, switch fixtures to per-request keys |
+| Q-07-2 | Are Jev answers independent of co-batched questions? If not, per-question fixtures drift from live | Assume independent | Phase 0: ask the same question in two different batches ×20; if |Δp| > 0.02 median, disable the question-level fallback |
 | Q-07-3 | HTTP/2 multiplexing (adds `h2`) | Off | Conformance latency test: cold-start cost of N parallel TLS handshakes vs one h2 connection |
 | Q-07-4 | Escalating breaker cooldown (60 → 120 → 300 s) on repeated opens | Fixed 60 s | Production decision logs: flapping rate |
 | Q-07-5 | Production answer cache (e.g. repeated walk level 1 for the same request in a session) | None in v1 | Latency data on `extends` routes |

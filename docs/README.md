@@ -6,6 +6,7 @@
 | [`design/`](design/) | One design doc per component. The source of truth for **implementation**: interfaces, algorithms, edge cases, tests, acceptance criteria. |
 | [`build-plan.md`](build-plan.md) | Spec §23 phases broken into work items, each mapped to a design doc and module. |
 | [`open-questions.md`](open-questions.md) | Every open question and proposed spec deviation raised in the design docs, with its proposed default. |
+| [`jev-docs-checks.md`](jev-docs-checks.md) | Checklist for verifying every Jev, TypeSafe and harness assumption against primary docs. |
 
 ## Design docs
 

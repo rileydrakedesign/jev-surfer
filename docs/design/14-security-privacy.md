@@ -158,7 +158,9 @@ The sanitizer is deterministic and part of card inputs, so a change to it change
 | E3 | Live MCP listing (stdio servers) | same | none directly; the child process may do its own networking | opt-in per server; the user already runs this server in their harness |
 | — | Telemetry, update checks, crash reports | never | — | no code path exists; a test asserts it (§8) |
 
-Everything else (discovery, git, schema parsing, co-change, schema refs, catalog, lease, logs, eval scoring) is local. `surf init` prints E1–E3 as the privacy table (spec §15.6 step 2) and requires confirmation.
+Everything else (discovery, git, schema parsing, co-change, schema refs, catalog, lease, logs, eval scoring) is local.
+
+What TypeSafe says it does with E1 payloads (checked 2026-09-23; the privacy statement may quote these, with links, but must not promise more): "Jev is not trained on customer requests or responses" (docs, Models → Data handling); zero data retention is offered to enterprise customers only; the Master Customer Agreement lets TypeSafe keep "Telemetry" (logs, hashes, statistics) about use of the service. So a default account should be assumed to retain request data for some period. E1 minimization (redaction, cards without file contents) is the control that holds regardless. `surf init` prints E1–E3 as the privacy table (spec §15.6 step 2) and requires confirmation.
 
 `systemone-local` with a non-loopback, non-RFC1918 endpoint is **not** local: `surf doctor` warns and `surf status` shows "judge: remote (<host>)". The spec §19.2 claim "nothing leaves the machine" holds only for loopback endpoints and `null` (D-14-3).
 
@@ -301,7 +303,7 @@ Assets: source code and secrets in the repo, prompt text, developer identity, in
 | T1 | Secret in prompt sent to judge | developer (accidental) | pasted logs, `.env` contents in prompt | §4.2 redaction; head/tail cap | Unknown key formats below the entropy rule |
 | T2 | File contents sent to judge | — | card builder bug | cards built from metadata only; canary egress test (§8) | Doc headings/titles are content by design |
 | T3 | Secret file indexed | — | `.env`, keys in repo | §3.2 globs; never opened | Secrets in ordinary source files (bodies never read, so not exposed) |
-| T4 | Routing manipulation | malicious contributor, third-party docs | doc headings, skill/MCP descriptions, file names | §4.4 filter; caps; ≤ 40 candidates; adversarial gates §4.7 | Misleading pointer or advisory skip; recoverable by design (spec §19.4) |
+| T4 | Routing manipulation | malicious contributor, third-party docs | doc headings, skill/MCP descriptions, file names | §4.4 filter; caps; ≤ 40 candidates; adversarial gates §4.7 | Misleading pointer or advisory skip; recoverable by design (spec §19.4). TypeSafe confirms the premise and offers no server-side mitigation: "State is data, and `jev-1.13` does not treat it as hostile by default. Content written to adversarially steer the model … can move the answer"; its advice is explicit criteria and testing. Cards go into `instructions`, not `state`, so the same caution applies to both |
 | T5 | Agent-context injection via note | malicious contributor | crafted path/name with newlines | §4.3 `path_is_safe`, `safe_name`, no prose in note | None known |
 | T6 | Code execution at index time | malicious repo | project `.mcp.json` + `--live-mcp` | project-defined servers not live by default; per-server consent showing argv | User consents to a malicious command |
 | T7 | Malicious MCP server abuses the listing session | configured server | sampling/roots requests, huge output, echoing tokens | empty client caps; −32601; output caps; env-value scrub; timeout | Server's own side effects on spawn |

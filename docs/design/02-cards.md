@@ -366,7 +366,7 @@ Paths and identifiers (file names, table names, capability names) are not redact
 
 ### 4.12 Budgets and `fit_card`
 
-**Token approximation** (D-02-1): `approx_tokens(s) = ceil(len(s.encode("utf-8")) / 4)`. Deterministic, no dependency. It over-counts non-ASCII (conservative) and roughly matches BPE tokenizers on paths and identifiers. It's a budget unit, not a cost estimate; `surf stats` can report real tokenizer counts in dev (Q-02-1).
+**Token approximation** (D-02-1): `approx_tokens(s) = ceil(len(s.encode("utf-8")) / 4)`. Deterministic, no dependency. It over-counts non-ASCII (conservative) and roughly matches BPE tokenizers on paths and identifiers. It's a budget unit, not a cost estimate; Real Jev counts come from the `usage` field of judge responses (07 §4.8), which `surf stats` reports (Q-02-1).
 
 | Card | Budget (approx tokens) | ≈ bytes |
 |---|---|---|
@@ -486,7 +486,7 @@ Refresh re-renders only changed nodes, their ancestors, and nodes whose edges ch
 
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
-| Q-02-1 | Is bytes/4 close enough to Jev's real tokenization? | Yes; report real counts in `surf stats` if a tokenizer is available | Measure on target catalogs; switch divisor with a format-version bump if error > 25 % |
+| Q-02-1 | Is bytes/4 close enough to Jev's real tokenization? | Yes. TypeSafe publishes no tokenizer or token-counting endpoint (checked 2026-09-23), but every response reports `usage.input_tokens`, so real counts come from the API, not a local tokenizer | Phase 0: fit reported `input_tokens` against `ceil(bytes/4)` per request (07 §8.4), allowing for the fixed ~300-token per-request overhead; switch divisor with a format-version bump if error > 25 % |
 | Q-02-2 | Churn thresholds 3/15 (files) | As §4.7 | Distribution on the two target repos |
 | Q-02-3 | Should `churn` or line counts appear in card text for Jev? | No | A/B on walk recall (spec §17.6) |
 | Q-02-4 | TOML (`+++`) frontmatter for Hugo docs | Not supported | User demand |

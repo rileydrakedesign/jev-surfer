@@ -733,7 +733,7 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | Bootstrap: 1,000 resamples × 15 metrics × 100 units | ≤ 1 s (per-unit partial sums) |
 | Live dev run, 100 items, A4, concurrency 1 | ≈ items × route p50 ≈ 3 min |
 | A8 coordinate sweep, live, 100 items | ≤ 19 × single run cost; memo and offline re-selection cut ~60 % in practice (estimate) |
-| A0 live, 2,000-card repo, 100 items | ~5,000 requests, ≈ $0.50, ≈ 10 min at concurrency 16 |
+| A0 live, 2,000-card repo, 100 items | ~5,000 requests, ≈ $0.50, ≈ 10 min at concurrency 8 (the `jev-1.13` account limit of 1,200 requests/min puts the floor at ≈ 4.2 min) |
 
 ---
 
@@ -796,7 +796,9 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
 | Q-16-1 | Is 8 files the right directory-credit limit? | Tie to the collapse limit (`eval.dir_credit_max_files = 8`) | If 09 changes the collapse rule, follow it |
-| Q-16-2 | Live run-to-run noise vs. the 0.03 tolerance | Keep 0.03 but require the paired CI to say `worse` in nightly; measure noise with two live runs in Phase 0 | Phase 0 noise measurement |
+| Q-16-2 | Live run-to-run noise vs. the 0.03 tolerance | Keep 0.03 but require the paired CI to say `worse` in nightly; measure noise with two live runs in Phase 0. Evidence (2026-09-23): Jev is not bit-reproducible. TypeSafe's self-consistency cookbook reports a mean per-question SD of 0.0102 over 15 repeats, with single answers spanning 0.43–0.53 (that run varied a `uid` field in state, so it bounds rather than measures identical-request noise). Items near a threshold can flip between live runs | Phase 0 noise measurement (07 §8.4) |
+| Q-16-9 | TypeSafe's question-writing guidance suggests wordings v1 hasn't tried: one judgment per question; high value = yes; state paths referenced in backticks (`request`); structured `instructions` with the card as a named field; optional Noul `criteria` (`true`/`false` descriptions); explicit boundaries ("what it is not for") for similar options. Add them as candidates? | Yes, as **candidates** in `bench/wordings.yaml` for the §17.6 experiments, never as shipped wordings without a dev run. Structured candidates need object-valued `instructions` in the wordings schema and in 07 (Q-07-8) | Dev-set wording experiment (spec §17.6) |
+| Q-16-10 | TypeSafe cookbooks rank candidates with a **Choice** over the shortlist (skill suggestion: 182 options, then a 3-option re-check plus one Noul per finalist) and walk hierarchies with one Choice per node and beam search (hierarchical classification). v1 uses one Noul per candidate. Worth an ablation? | Not in v1. Record as v2 ablation ideas (`walk: choice-beam`, `final: choice+nouls`); the docs warn that Choice is relative ("settling *which* option") while Nouls are absolute and can all be low, which is what surf's selection needs | v2 ablation, after the v1 test report |
 | Q-16-3 | Question-level fixture fallback and replayed latency (`simulate_latency`) belong to 07's `judge/fixture.py` | Adopt both in 07 | Resolved: 07 D-07-3 |
 | Q-16-4 | The regen workflow runs PR code with the judge API key | Maintainer label only, same-repo branches only, a budget-capped eval-only key | Maintainer decision |
 | Q-16-5 | Test set is 24–40 queries per repo → recall CI width ≈ ±0.1; the 0.85 target is weakly tested | Headline test metric pooled across both repos (cluster bootstrap by item), per-repo also shown | User decision |

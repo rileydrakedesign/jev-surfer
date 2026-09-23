@@ -264,12 +264,12 @@ Profile keys must match `^(jev|systemone-local|llm|fixture)(:[A-Za-z0-9._-]+)?$`
 |---|---|---|---|
 | `judge.backend` | `Literal["jev","systemone-local","llm","null","fixture"]` | `"jev"` | §4.4 purpose rules |
 | `judge.provider` | `Literal["typesafe","openrouter","vercel","cloudflare"]` | `"typesafe"` | `jev` backend only |
-| `judge.model` | str | `"jev-1.13.0"` | non-empty; `*latest*` → soft-limit warning (pin versions) |
+| `judge.model` | str | `"jev-1.13.0"` | non-empty; an alias (`*latest*`, `*preview*`) → soft-limit warning (pin versions; aliases move when TypeSafe ships a release) |
 | `judge.timeout_ms` | `int \| None` | `None` → per backend: jev 1200, systemone-local 3000, llm 20000 | 100–60,000; per attempt |
 | `judge.min_request_ms` | int | `150` | 0–5,000 |
-| `judge.max_concurrency` | int | `16` | 1–128; per process |
+| `judge.max_concurrency` | int | `8` | 1–128; per process (07 D-07-8) |
 | `judge.max_questions_per_request` | int | `40` | 5–255 (Choice cap) |
-| `judge.max_request_tokens` | int | `8000` | ≥ 1,000 |
+| `judge.max_request_tokens` | int | `8000` | 1,000–64,000 (`jev-1.13` context: 64k per request, 32k for state + longest question) |
 | `judge.retry` | bool | `true` | retry-once policy (spec §13.2) |
 | `judge.breaker.failures` | int | `3` | 1–50 consecutive failed batches |
 | `judge.breaker.cooldown_s` | int | `60` | 1–3,600 |

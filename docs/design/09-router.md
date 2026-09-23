@@ -438,7 +438,7 @@ Then `leases.commit(session_id, continuity, request=redacted_prompt, selection, 
 | ~810 | final pass fired |
 | ~1,200 | final answered; select, lease, note, decision record (≤ 10 ms) |
 
-Three sequential round trips (spec §11.9: 2–4).
+Three sequential round trips (spec §11.9: 2–4). The ~400 ms per round trip above is conservative: TypeSafe documents ~100 ms for most queries and its cookbooks measure 90–310 ms, so cold TLS set-up (07 §4.5) and hook start-up (12) are the larger costs. Phase 0 replaces these numbers with measured ones.
 
 ---
 
@@ -621,7 +621,7 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 |---|---|---|---|
 | Q-09-1 | Add `previous_task` to final-pass state on `extends` ("also email the customer when *it* ships")? | No | Sequence eval: delta recall with/without |
 | Q-09-2 | `walk_guard` 0.5 and `beam_min` 1 | As listed | Dev: guard rate vs recall on `natural` queries |
-| Q-09-3 | Does Jev latency grow with questions per request? If so, split the final pass at ~20 | Split only by token budget | 07 conformance latency curve |
+| Q-09-3 | Does Jev latency grow with questions per request? If so, split the final pass at ~20 | Split only by token budget. Documented (2026-09-23): questions in a request are evaluated in parallel and "adding questions barely changes the response time"; TypeSafe's parallel-questions cookbook measures one 13-question call as ~10x faster than 13 single calls | 07 conformance latency curve confirms; no split unless it contradicts the docs |
 | Q-09-4 | `max_frontier` 12 | 12 | Layered repo recall vs requests per route |
 | Q-09-5 | Skip speculation when a lease exists and the prompt is short (likely `same`) | Always speculate | Wasted-token share in decision logs |
 | Q-09-6 | Should a directory path hit seed the walk at that directory? | No (pool + flatten) | Links Q-08-6 |
@@ -630,3 +630,4 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 | Q-09-9 | Collapse on direct vs recursive file count | Direct | Eval precision on dir-collapsed notes |
 | Q-09-10 | 15 §3.3 wants the top 20 **rejected** expansion neighbours in the trace; 04's `expand()` returns admitted candidates only | 04 adds `expand(..., collect_rejected: int = 0)` returning `(admitted, rejected)` | Resolved: adopted in 04 §2/§4.5 |
 | Q-09-11 | Expansion keys: 16 §3.5 proposes `router.expand_kinds`, 04 §5 defines `router.expand.enabled_kinds` | Use 04's `router.expand.enabled_kinds`; 16's ablation overlays should be renamed | Resolved: 13 D-13-8; 16 renamed |
+| Q-09-12 | Spec §20 lists 7 Jev limitations; TypeSafe's jev-1.13 jaggedness page (reviewed 2026-09-17) lists 9. Not covered: indirection, contradictory instructions/criteria, structural invariants (a Noul and its negation don't sum to 1; Noul vs Choice), generation; plus English-first language support | The design already complies: every question is single-hop and positively phrased; `not_needed` comes from the low end of the `use` Noul (§4.6), never from a negated question; option descriptions stay aligned with the continuity instruction; no threshold crosses question types. Add the rows to spec §20 with owner approval; tag non-English prompts in the decision record for eval slicing (15) | Owner (spec edit) |

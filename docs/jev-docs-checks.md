@@ -169,8 +169,40 @@ Fill in one row per check. Keep "Evidence" to a URL plus a short quote.
 
 | Id | Status (confirmed / corrected / unanswerable) | Evidence (URL, date, quote) | Docs changed |
 |---|---|---|---|
-| J-A1 | | | |
-| … | | | |
+| J-A1 | confirmed | https://docs.typesafe.ai/api, 2026-09-23: "POST https://api.typesafe.ai/v1/systemone" | 07 §3.1 (no longer UNVERIFIED) |
+| J-A2 | confirmed | https://docs.typesafe.ai/api: "Authorization: Bearer <API_KEY>"; https://docs.typesafe.ai/sdk/python/api/constants: `API_KEY_ENV = 'TYPESAFE_API_KEY'` | none |
+| J-A3 | corrected | https://docs.typesafe.ai/api: Choice takes "`criteria` … A map of option to rubric description"; Noul takes optional `criteria` {`true`,`false`}; `instructions` "string \| object \| array" | 07 §2.2, §3.1 (encode `options` → `criteria`); jev-reference §3 |
+| J-A4 | confirmed (wider) | https://docs.typesafe.ai/api: `state` "string \| object \| array"; https://docs.typesafe.ai/concepts/state: "Use an object for most requests so each part of the state has a descriptive name" | none (surf sends an object of strings); backticked state paths noted as a wording candidate (16 Q-16-9) |
+| J-A5 | confirmed | https://docs.typesafe.ai/api: "You choose each key … The key is not sent to the underlying model and is not used in inference." Grammar/length undocumented | 07 §3.1 (keep opaque keys; option keys *are* seen by the model) |
+| J-A6 | corrected | https://docs.typesafe.ai/api: Noul answer `{"type":"noul","noul":0.95}`; Choice `{"type":"choice","choice",…,"probabilities",…,"confidence"}`; top level also has `model` | 07 §2.2, §3.1, §4.3 (aliases dropped; `type` checked; `model` echo checked) |
+| J-A7 | confirmed | https://docs.typesafe.ai/api: `usage` (required) with `input_tokens`, `output_tokens` | 07 §4.8; 02 Q-02-1 |
+| J-A8 | corrected | https://docs.typesafe.ai/api errors table: 401, 422 ("failed validation … the body details the offending field"), 429, **529 Overloaded**; https://docs.typesafe.ai/sdk/python/api/retries: retries `{408, 429, *range(500, 600)}`, honors `Retry-After` and `retry-after-ms` | 07 §4.6 (408, 529, `retry-after-ms`), §6; `request_id` from `x-typesafe-request-id` (07 §3.3) |
+| J-A9 | confirmed | https://docs.typesafe.ai/models: "`jev-1.13.0`"; aliases `jev-latest`, `jev-preview`; "The response's `model` field reports the versioned ID that answered … pin that version's ID instead of the alias" | 07 §4.3 (model echo), 13 (alias warning covers `*preview*`) |
+| J-B1 | confirmed | https://docs.typesafe.ai/primitives/noul: "the probability that the answer is yes where 0 means no and 1 means yes"; https://docs.typesafe.ai/introduction/machine-learning-primer: calibrated (RLCD) | none |
+| J-B2 | corrected | https://docs.typesafe.ai/api: `confidence` required, "derived from probabilities"; https://docs.typesafe.ai/primitives/choice examples: probabilities 0.61/0.35/0.04 → confidence 0.42, so not `max(probs)` | 07 §2.2, §4.3 (missing `confidence` from `jev` → key invalid; `max(probs)` fallback kept only for `llm`/`systemone-local`) |
+| J-B3 | corrected | https://docs.typesafe.ai/api: options go in `criteria`; values may be string, object, array or `null`; https://docs.typesafe.ai/primitives/choice: "The option names and their descriptions are both sent to the model" | 07 §3.1 (wire mapping only; internal `ChoiceQ.options` unchanged) |
+| J-B4 | confirmed | https://docs.typesafe.ai/model-jaggedness/jev-1.13: "Don't carry a threshold tuned on a Noul over to a Choice" | none |
+| J-B5 | confirmed | https://docs.typesafe.ai/primitives/score: Score returns `score`, `legend`, `probabilities`, `confidence`; 2–10 levels (https://docs.typesafe.ai/api). v2 idea: Choice-based ranking, not Score (16 Q-16-10) | 16 Q-16-10 |
+| J-B6 | confirmed | https://docs.typesafe.ai/primitives: "Every answer is independent. One question's answer is not hidden context for another. You can add or remove questions without changing the others' results." | 07 Q-07-2 narrowed to a sanity check |
+| J-B7 | confirmed (plus optional criteria) | https://docs.typesafe.ai/primitives: `instructions` is "the question you are asking … or … a statement for the model to judge"; no system prompt field. Noul `criteria` and structured instructions are optional extras | 07 Q-07-8; 16 Q-16-9 |
+| J-B8 | confirmed | https://docs.typesafe.ai/model-jaggedness/jev-1.13: "State is data, and `jev-1.13` does not treat it as hostile by default … can move the answer." No server-side mitigation documented | 14 §4.9 T4 |
+| J-C1 | confirmed | No question cap in https://docs.typesafe.ai/api or https://docs.typesafe.ai/primitives; limits are context-based (https://docs.typesafe.ai/models). Cookbooks send 182–218 options in one request | 07 §4.2 wording |
+| J-C2 | confirmed | https://docs.typesafe.ai/api: "You can have a maximum of 255 options per Choice." | none |
+| J-C3 | confirmed (cap kept) | https://docs.typesafe.ai/models: "64k tokens per request; 32k tokens for `state` plus the longest question" | 07 §4.2; 13 range 1,000–64,000 for `judge.max_request_tokens` (default 8,000 kept for accuracy) |
+| J-C4 | unanswerable → Phase 0 | No tokenizer or counting endpoint documented; responses report `usage.input_tokens`. Examples show ~296 tokens for a 1-question request (fixed overhead) | 02 Q-02-1, 07 §4.8 |
+| J-C5 | unanswerable | No length limit for instructions or criteria beyond the context budget | none |
+| J-D1 | confirmed | https://docs.typesafe.ai/concepts/how-to-build-with-system-one: "Most queries complete in about 100 ms"; consistency cookbooks: 111 ms / 114 ms mean round trip | 07 §4.5, 09 §4.14 (note); targets look reachable, `open-questions.md` §1 row 6 unaffected |
+| J-D2 | confirmed | https://docs.typesafe.ai/primitives: "System One models evaluate every question in a request in parallel. Adding questions barely changes the response time" | 09 Q-09-3 (resolved pending the Phase 0 curve) |
+| J-D3 | corrected | https://docs.typesafe.ai/models: "250,000 tokens per second / 1,200 requests per minute", "can change without notice"; https://docs.typesafe.ai/cookbooks/entity_alignment: "the public endpoint rate-limits above roughly eight" | 07 §4.4, §5, D-07-8; 13 default 8; 16 §7 |
+| J-D4 | corrected (not guaranteed) | https://docs.typesafe.ai/models: SDKs "honor the `retry-after` header when the response carries one"; SDK also reads `retry-after-ms` | 07 §4.6 |
+| J-D5 | confirmed | https://docs.typesafe.ai/models: "\$42 / \$0.042" per Btok/Mtok; "Charged per input token. Output tokens are free." | 07 §4.8 (quote) |
+| J-D6 | unanswerable → Phase 0 | HTTP/2 not mentioned | 07 Q-07-3 |
+| J-D7 | corrected | No "early access" wording; https://docs.typesafe.ai/models warning: "Rate limits are adjusting dynamically … Higher limits are available on custom and enterprise plans." No SLA in docs; MCA has a generic service warranty | spec §20 row "Hosted, early access" is stale (Q-09-12 lists spec §20 updates); breaker defaults unchanged |
+| J-G1 | corrected (gaps) | https://docs.typesafe.ai/model-jaggedness/jev-1.13 lists 9 modes; spec §20 misses indirection, contradictory instructions/criteria, structural invariants, generation, language | 09 Q-09-12; `open-questions.md`; jev-reference §10 (spec not edited) |
+| J-G2 | unanswerable | Not documented. Related advice: structured option descriptions with `not_for` separate lookalikes (https://docs.typesafe.ai/primitives/advanced) | none; eval decides (09 §4.8) |
+| J-G3 | confirmed (guidance found) | https://docs.typesafe.ai/primitives/noul: "Phrase the question so that a high value means yes … A statement works as well as a question"; backticked state paths; structured instructions; Noul `criteria` | 16 Q-16-9 (candidates only) |
+| J-G4 | confirmed | https://docs.typesafe.ai/models: "English is the primary training language … Other languages, including CJK scripts, are handled but not equally well" | 09 Q-09-12 |
+<!-- rows J-E*, J-F*, J-H*, J-I*, H-* appended below -->
 
 ## 4. Done when
 

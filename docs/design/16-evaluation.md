@@ -711,6 +711,7 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | Directory prefix flipped (`code:` ↔ `doc:`) since labeling | Matched by path (F2); V14 warning |
 | Catalog changed since fixtures were recorded | Fixture misses → CI fails with the regen instruction (§4.10) |
 | Judge rate-limited mid-run | Rows become `judge-unavailable` (counted as misses, attributed `status`); run invalid above 5 % |
+| Live eval with `judge.provider` other than `typesafe` | Refused with a message: only TypeSafe direct pins `jev-1.13.0` exactly (OpenRouter pins the minor version, Vercel doesn't pin; 07 §3.2). Fixture replay of recordings made through TypeSafe is unaffected |
 | Jev returns different probabilities for the same request across runs | Within a run, `MemoJudge` makes them identical; across runs it's noise, covered by CIs and the paired-CI condition in nightly |
 | Sequence turn 0 routed `same` (impossible without a lease) | Scored as effective `new` |
 | Duplicate query across dev and test | V2 error |

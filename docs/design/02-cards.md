@@ -306,11 +306,11 @@ Triggered only by `surf init --live-mcp` (per-server y/N prompt) or `surf index 
 
 | Concern | Rule |
 |---|---|
-| Protocol | MCP Python SDK client. Send `initialize` (client capabilities **empty**: no roots, sampling or elicitation), `notifications/initialized`, `tools/list` (follow `nextCursor`, max 10 pages). Nothing else. `tools/call`, `resources/*`, `prompts/*` are never sent; server→client requests are answered with a JSON-RPC error. |
+| Protocol | MCP Python SDK client (v2). Send `server/discover` (2026-07-28 spec; `instructions` come from its result); if the server is legacy (error or no reply), fall back to `initialize` + `notifications/initialized` (`instructions` from the InitializeResult). Client capabilities **empty**: no roots, sampling or elicitation. Then `tools/list` (follow `nextCursor`, max 5 pages / 500 tools, as 14 §4.5). Nothing else. `tools/call`, `resources/*`, `prompts/*` are never sent; server→client requests are answered with a JSON-RPC error. |
 | stdio process | `command` + `args` from config, `cwd` = repo root, own process group, stdin/stdout pipes, stderr to a 64 KiB ring buffer that is discarded (never logged: it can echo tokens). |
 | Env | `capabilities.live_env = "inherit"` (default: parent env, as harnesses do) or `"minimal"` (PATH, HOME, USER, LANG, LC_*, TMPDIR/TEMP/TMP, SYSTEMROOT, APPDATA, USERPROFILE, XDG_*, proxy and CA vars). Config `env` values are expanded (`${VAR}`, `${VAR:-default}`) and added. Secrets exist only in the child env; nothing from env, args or headers is persisted or logged. |
 | HTTP / SSE | Configured headers expanded the same way. 401/403 or `WWW-Authenticate` → `needs_auth`; no OAuth flow is started. TLS verification on; proxy env respected. |
-| Timeouts | `initialize` ≤ `capabilities.live_timeout_ms` (10 s), `tools/list` total ≤ same, hard cap 20 s per server. Then SIGTERM to the group, 2 s, SIGKILL. Servers listed concurrently, max 4. |
+| Timeouts | `server/discover` / `initialize` ≤ `capabilities.live_timeout_ms` (10 s), `tools/list` total ≤ same, hard cap 20 s per server. Then SIGTERM to the group, 2 s, SIGKILL. Servers listed concurrently, max 4. |
 | Failures | `timeout`, `spawn_error`, `needs_auth`, `protocol_error` → no listing; card stays static; `surf init` asks for the one-line purpose (spec §7.6 step 4). |
 | Foundations exception | 00 §6 allows only `git`/`rg` subprocesses. Live listing spawns user-configured servers; it lives in `extract_caps.py`, runs only on explicit opt-in commands, and is flagged for 00. |
 
@@ -465,7 +465,7 @@ Refresh re-renders only changed nodes, their ancestors, and nodes whose edges ch
 3. Two builds of the same commit produce identical `card` and `hash` for every surface; a whitespace-only commit changes no `hash`.
 4. `surf index --check` passes in CI with live listings present and no network access.
 5. No card contains a string matched by `redact.py` patterns (scan over golden and target catalogs).
-6. The live-listing fake server never receives a method other than `initialize`, `notifications/initialized`, `tools/list`.
+6. The live-listing fake server never receives a method other than `server/discover`, `initialize`, `notifications/initialized`, `tools/list` (tested against both a 2026-07-28 and a legacy fake server).
 
 ## 10. Deviations from the spec and open questions
 

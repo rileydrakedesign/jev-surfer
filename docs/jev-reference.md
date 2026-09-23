@@ -148,15 +148,15 @@ The SDK adds what the API page doesn't list: 400, 403, 404 and generic 5xx excep
 
 | Fact | Value | Source |
 |---|---|---|
-| Typical latency | "Most queries complete in about 100 ms" | Build |
-| Measured round trips | 111 ms (14 Nouls) and 114 ms (Choice) mean over 15 runs; 0.09–0.31 s for a 182-option Choice + 3 Nouls | Self-consistency cookbooks, Skill suggestion |
+| Typical latency | "Most queries complete in about 100 ms" (Build); "End-to-end response time is 70ms-500ms", service on the US West Coast (launch blog) | Build, blog |
+| Measured round trips | 111 ms (14 Nouls) and 114 ms (Choice) mean over 15 runs; 0.09–0.31 s for a 182-option Choice + 3 Nouls. Third-party: jev-router reports a 511 ms median (location unknown) | Self-consistency cookbooks, Skill suggestion, jev-router README |
 | Question count vs latency | Questions run in parallel; "adding questions barely changes the response time" | Primitives |
 | Batching vs single calls | One 13-question call ≈ 12x cheaper and 10x faster than 13 calls with "no change in answers" | Parallel questions cookbook |
 | Price | $0.042 per million input tokens ($42 per billion); output free | Models |
-| Per-request overhead | ~280–300 input tokens (a 1-question request on a 12-word state reports 296) | API examples |
+| Per-request overhead | ~260–300 input tokens (a 1-question request on a 12-word state reports 296; jev-fanout-bench measured ~261 via OpenRouter) | API examples, awesome-jev |
 | SDK default timeout | 10 s per HTTP operation | SDK constants |
 
-Implication for surf: spec §11.9 cost (≈ $0.001 per route) holds, and latency targets look reachable; the network round trip is not the bottleneck, cold TLS and hook start-up are (07 §4.5, 12). Row 6 of `open-questions.md` §1 is unaffected.
+Implication for surf: spec §11.9 cost (≈ $0.001 per route) holds. Latency targets look reachable from the US; the published range (70–500 ms) is wide enough that distance to the West Coast and cold TLS matter more than question count (07 §4.5, 12). Phase 0 measures from where the developers are. Row 6 of `open-questions.md` §1 is unaffected.
 
 ## 9. Answer semantics
 
@@ -217,16 +217,29 @@ Collected from Primitives, Noul, Choice, Advanced and Build. Per spec §17.6 non
 
 | Fact | Value | Source |
 |---|---|---|
-| Install / import | `pip install typesafe-sdk` / `import typesafe_sdk` (spec §22.1's `typesafe-sdk-python` is the GitHub repo name, not the package) | SDK |
+| Install / import | `pip install typesafe-sdk` (0.7.1) / `import typesafe_sdk`. Spec §22.1's `typesafe-sdk-python` is the GitHub repo name, not a PyPI package | SDK, PyPI |
 | Clients | `TypeSafeClient` (sync) and `AsyncTypeSafeClient` (async); `client.system_one(state=…, questions=…, model=…)`; typed `Noul`, `Choice`, `Score`, `NoulCriteria`; answers via `response.answers[...]` or `response.nouls` / `.choices` / `.scores` | SDK |
 | Config | `api_key`, `base_url` (so any `/v1/systemone`-compatible endpoint works), `timeout`, `retry=RetryPolicy(...)`, custom `http_client` | SDK clients |
 | Errors | `TypeSafeAPIError` subclasses per status, `TypeSafeAPIConnectionError`, `TypeSafeAPITimeoutError`, `TypeSafeAPIResponseValidationError` (with `field_path`) | SDK exceptions |
 
-SDK packaging details (version, dependencies, import time) and the runtime decision are in §14.
+Version, dependencies, import cost and the runtime decision are in §14.
 
 ## 14. Providers, gateways and the SDK decision
 
-_Filled from the gateway/SDK research pass; see §3 of `jev-docs-checks.md`._
+All checked 2026-09-23. Every provider below uses the native envelope of §3–4; none needs a chat codec.
+
+| Provider | Endpoint | Model id | Pin | Response `model` | Notes | Source |
+|---|---|---|---|---|---|---|
+| TypeSafe | `https://api.typesafe.ai/v1/systemone` | `jev-1.13.0` | exact | `jev-1.13.0` | Early access with a waitlist at launch (blog, 2026-09-15) | Models; https://typesafe.ai/blog/introducing-system-one-models-and-jev |
+| OpenRouter | `https://openrouter.ai/api/v1/systemone` | `typesafe/jev-1.13` (`~typesafe/jev-latest` for the alias) | minor version, dated snapshot | `typesafe/jev-1.13-20260917` | "no waitlist or separate TypeSafe account"; not in the default chat-only `/api/v1/models` list (use `?output_modalities=all`); extra `id`, `provider`, `usage.cost`; errors `{"error":{"code","message"}}`, adds 402; 32k context listed; data policy `training: false, retainsPrompts: false`. An alpha `/api/alpha/decisions` surface exists (used by some prior art); don't use it | https://openrouter.ai/docs/guides/community/typesafe-sdk |
+| Vercel AI Gateway | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | none | `typesafe-ai/jev` | AI Gateway key or OIDC token; "The response uses TypeSafe's field names"; errors `{message, error_type}`; `zdr: all`; free until 2026-09-25. Its separate `/v1/evaluate` API renames Noul to `boolean`; don't use it | https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe |
+| Cloudflare | Workers AI `POST https://api.cloudflare.com/client/v4/accounts/{id}/ai/run`, body `{"model":"typesafe/jev","input":{state, questions}}` | `typesafe/jev` | none | `jev-1.13.0` (example) | Not an AI Gateway provider; different envelope. Dropped from v1 (07 D-07-9) | https://developers.cloudflare.com/ai/models/typesafe/jev/ |
+
+Local open reproductions ("independent efforts, not official TypeSafe releases", awesome-jev list) expose the same `/v1/systemone` path. Reference for surf: **Laya** (`pip install "laya[serve]"`, `laya-serve`, `127.0.0.1:8321`, Apache-2.0 code and weights, CPU, "degrades past about 20 options"). Others: LitJev (Apache-2.0 code, Qwen weights, "Probabilities are not calibrated by default"), kev (Apache-2.0), ruling (MIT, Apple MLX), open-jev (Gemma weights, non-Apache terms), openjev-sglang (no LICENSE). There are no published Jev weights.
+
+**SDK decision (07 D-07-2, Q-07-1 resolved):** `typesafe-sdk` 0.7.1 (MIT, Python ≥ 3.10, first public release 2026-09-14) is async and works with OpenRouter and Vercel through `base_url`, but its path is hardcoded to `/v1/systemone`, it depends on `httpx2` (not httpx), `import typesafe_sdk` measured ~243 ms vs ~129 ms for httpx + pydantic, it has had two breaking minor releases, and debug logging writes request bodies unredacted. surf keeps httpx at runtime and uses the SDK only in the conformance test. If it is ever used at runtime, pass `RetryPolicy(max_retries=0)` so 07's retry and breaker logic governs.
+
+**Prior art (spec §4), licenses checked 2026-09-23:** MIT: jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router, jev-skillful. No LICENSE: jev-router, blink, jev-knowledge-base (spec §4 lists only jev-router as unlicensed; see `open-questions.md` Q-07-9). All of them use the field names in §3–4. Useful practice: jev-codex-router caps at 40 questions per request; jev-skillful retries {429, 502, 503, 504, 529}; one project defaults a missing answer to `noul = 0.0`, which surf must not do (07 §4.3 treats it as missing).
 
 ## 15. Still unverified: Phase 0 live checks
 
@@ -242,3 +255,4 @@ Everything below is either undocumented or documented only by example. 07 §8.4 
 | Reported `input_tokens` vs `ceil(bytes/4)` | Token heuristic, fixed overhead | Q-02-1 |
 | Question-id grammar and length | We send opaque `q000` anyway; only matters if that changes | 07 §3.1 |
 | Deprecation policy for versioned ids | Pinning lifetime | §6 |
+| OpenRouter accepts `jev-1.13.0`? Probabilities identical to TypeSafe direct on a fixed request? | Gateway use outside eval | 07 Q-07-6 |

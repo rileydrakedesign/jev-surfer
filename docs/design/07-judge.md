@@ -13,7 +13,7 @@ The judge is the only component that talks to a model. The router (09) speaks on
 
 **In scope (v1)**
 - Async protocol with a sync facade; typed questions/answers; per-request outcomes for batches.
-- Backends: `jev` (providers `typesafe`, `openrouter`, `vercel`, `cloudflare`), `systemone-local`, `llm` (eval baseline), `null`, `fixture` (record/replay).
+- Backends: `jev` (providers `typesafe`, `openrouter`, `vercel`), `systemone-local`, `llm` (eval baseline), `null`, `fixture` (record/replay).
 - Resilience: per-request timeout clipped to the route deadline, retry-once, concurrency semaphore, circuit breaker persisted across processes.
 - Question batching limits (≤ 40 questions per request, balanced auto-split).
 - Token and cost accounting per route.
@@ -155,13 +155,14 @@ All knowledge of the Jev/System One HTTP format is in **`judge/jev_wire.py`**, u
 ```python
 @dataclass(frozen=True)
 class ProviderSpec:
-    name: str                    # typesafe | openrouter | vercel | cloudflare | local
-    base_url: str                # may contain {account_id}/{gateway_id} placeholders
+    name: str                    # typesafe | openrouter | vercel | local
+    base_url: str
     path: str
     auth_headers: Callable[[Mapping[str, str]], dict[str, str]]   # env -> headers
     key_env: tuple[str, ...]     # env vars required
     model_id: Callable[[str], str]                                # "jev-1.13.0" -> provider's model string
-    envelope: Literal["native", "chat"]                           # body codec
+    normalize_model: Callable[[str], str]                         # echoed model -> comparable id (§3.2)
+    parse_error: Callable[[int, bytes], str]                      # provider error body -> detail (no prompt text)
 
 PROVIDERS: dict[str, ProviderSpec]
 def encode(req: JudgeRequest, *, model: str, spec: ProviderSpec) -> tuple[bytes, KeyMap]: ...
@@ -199,17 +200,25 @@ Response:
 
 `decode` reads only the documented field names; the earlier alias list (`p`, `probs`, …) is dropped. The Phase 0 conformance test (§8.4) still runs before any eval, as a live check of the documented format.
 
-### 3.2 Provider table (all values UNVERIFIED)
+### 3.2 Provider table (verified 2026-09-23; sources in [`../jev-reference.md`](../jev-reference.md) §14)
 
-| Provider | Base URL (default) | Auth | Key env | Model string | Envelope |
-|---|---|---|---|---|---|
-| `typesafe` | `https://api.typesafe.ai` + `/v1/systemone` | `Authorization: Bearer $KEY` | `TYPESAFE_API_KEY` | `jev-1.13.0` | native |
-| `openrouter` | `https://openrouter.ai/api/v1/...` | `Authorization: Bearer $KEY` | `OPENROUTER_API_KEY` | `typesafe/jev-1.13.0` (guess) | native or chat |
-| `vercel` | `https://ai-gateway.vercel.sh/v1/...` | `Authorization: Bearer $KEY` | `AI_GATEWAY_API_KEY` | `typesafe/jev-1.13.0` (guess) | native or chat |
-| `cloudflare` | `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/typesafe/...` | upstream key + optional `cf-aig-authorization: Bearer $CF_AIG_TOKEN` | `TYPESAFE_API_KEY` (+ `CF_AIG_TOKEN`) | `jev-1.13.0` | native (proxied) |
-| `local` (`systemone-local`) | `judge.local.base_url` + `/v1/systemone` | optional Bearer | `SYSTEMONE_LOCAL_API_KEY` (optional) | `judge.model` | native |
+Every supported provider speaks the native System One envelope (§3.1), so there is no `chat` codec and `ProviderSpec.envelope` is always `"native"`.
 
-Escape hatches (13-config): `judge.base_url`, `judge.path`, `judge.cloudflare.account_id`, `judge.cloudflare.gateway_id`. If a gateway turns out to require an OpenAI-style `chat` envelope, that codec is added inside `jev_wire.py` only.
+| Provider | Base URL + path | Auth | Key env | `model` sent for `judge.model = "jev-1.13.0"` | Pin granularity | `model` echoed | Error body |
+|---|---|---|---|---|---|---|---|
+| `typesafe` | `https://api.typesafe.ai` + `/v1/systemone` | `Authorization: Bearer $KEY` | `TYPESAFE_API_KEY` | `jev-1.13.0` | exact version | `jev-1.13.0` | JSON, status per 07 §4.6 |
+| `openrouter` | `https://openrouter.ai/api` + `/v1/systemone` | `Authorization: Bearer $KEY` | `OPENROUTER_API_KEY` | `typesafe/jev-1.13` | minor version (dated snapshot) | `typesafe/jev-1.13-20260917` | `{"error": {"code", "message"}}`; adds 402 (insufficient credits) |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe` + `/v1/systemone` | `Authorization: Bearer $KEY` (AI Gateway key or Vercel OIDC token) | `AI_GATEWAY_API_KEY` | `typesafe-ai/jev` | **none** (single unversioned id) | `typesafe-ai/jev` | `{"message", "error_type"}`; provider errors passed through |
+| `local` (`systemone-local`) | `judge.local.base_url` + `/v1/systemone` | optional Bearer | `SYSTEMONE_LOCAL_API_KEY` (optional) | `judge.model` | – | implementation-defined | implementation-defined |
+
+- `ProviderSpec.model_id` maps the pinned id to the provider string above; `ProviderSpec.normalize_model` maps the echoed string back to a comparable id (`typesafe/jev-1.13-20260917` → `jev-1.13`), used for the §4.3 model check at the provider's pin granularity. Decision records keep both the provider and the raw echoed value (15).
+- Extra response fields (`id`, `provider`, `usage.cost` on OpenRouter; `provider_metadata` on Vercel) are ignored; cost is always computed from `usage.input_tokens` (§4.8).
+- OpenRouter 402 → `AUTH` kind (not retried; breaker opens for `auth_cooldown_s`; `surf doctor` says "check credits").
+- **Eval runs require `provider = "typesafe"`** (16): only TypeSafe direct pins `jev-1.13.0` exactly. `surf doctor` warns when the configured provider can't honor the pin.
+- `local`: Laya (`pip install "laya[serve]"`, `laya-serve`, default `http://127.0.0.1:8321/v1/systemone`, Apache-2.0 code and weights, CPU) is the reference open reproduction for A7. Reproductions are community projects, not TypeSafe releases; calibration differs and several degrade on large Choices (Laya "past about 20 options"), which v1 doesn't ask.
+- **Cloudflare is not a v1 provider** (D-07-9). Cloudflare AI Gateway has no TypeSafe provider; Jev is reachable only as the Workers AI third-party model `typesafe/jev` via `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run` with a different envelope (`{"model", "input": {state, questions}}`) and no version pin, or through a user-registered custom provider. Either can be added later as a new codec in `jev_wire.py` with its own config keys.
+
+Escape hatches (13-config): `judge.base_url`, `judge.path`.
 
 ### 3.3 Ledger
 
@@ -452,7 +461,7 @@ Owned by 13-config; consumed here.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `judge.backend` | enum | `"jev"` | `jev` \| `systemone-local` \| `llm` \| `null` \| `fixture` |
-| `judge.provider` | enum | `"typesafe"` | `typesafe` \| `openrouter` \| `vercel` \| `cloudflare` |
+| `judge.provider` | enum | `"typesafe"` | `typesafe` \| `openrouter` \| `vercel` (D-07-9: no `cloudflare`) |
 | `judge.model` | str | `"jev-1.13.0"` | pinned |
 | `judge.timeout_ms` | int | 1200 | per attempt; backend-specific defaults for `llm` (20000), `systemone-local` (3000) |
 | `judge.min_request_ms` | int | 150 | don't start/retry below this remaining budget |
@@ -466,7 +475,6 @@ Owned by 13-config; consumed here.
 | `judge.price_per_mtok_input` | float | 0.042 | USD |
 | `judge.price_per_mtok_output` | float | 0.0 | |
 | `judge.base_url`, `judge.path` | str? | None | override provider defaults |
-| `judge.cloudflare.account_id`, `.gateway_id` | str? | None | required for `cloudflare` |
 | `judge.local.base_url` | str | `"http://127.0.0.1:8080"` | `systemone-local` |
 | `judge.llm.base_url`, `.model`, `.key_env` | str | none, required | `llm` |
 | `judge.llm.allow_routing` | bool | false | |
@@ -554,10 +562,10 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 
 ### 8.4 Conformance (Phase 0, live, `@pytest.mark.live`, needs keys)
 
-The documented format is already transcribed in §3.1 (verified against the docs on 2026-09-23). The live test confirms that the service matches its docs and measures what the docs don't say (list in [`../jev-reference.md`](../jev-reference.md) §12):
+The documented format is already transcribed in §3.1 (verified against the docs on 2026-09-23). The live test confirms that the service matches its docs and measures what the docs don't say (list in [`../jev-reference.md`](../jev-reference.md) §15):
 
 - Send a 3-question request (2 Nouls with obvious answers, 1 Choice) through each configured provider; assert decode succeeds, obvious answers are on the right side of 0.5, `usage` is parsed, `model` echoes the pinned id.
-- If `typesafe-sdk` is installed (dev extra), encode the same request through the SDK with a capturing transport and diff against `jev_wire.encode`.
+- If `typesafe-sdk==0.7.1` is installed (dev extra), encode the same request through the SDK with a capturing transport and diff against `jev_wire.encode`.
 - Latency vs. question count (1, 10, 20, 40), cold and warm, for Q-09-3 and Q-07-3 (the docs claim adding questions "barely changes the response time").
 - Same request ×20: run-to-run spread of `noul` on identical requests (Q-16-2; the docs report SD ≈ 0.01 but with a varying `uid` field in state).
 - Same question in two different batches ×20 (Q-07-2; the docs say answers are independent).
@@ -570,7 +578,7 @@ The documented format is already transcribed in §3.1 (verified against the docs
 
 | Phase | Criterion |
 |---|---|
-| Phase 0 exit | Conformance test passes for `typesafe` and at least one gateway; every UNVERIFIED item in §3.1–3.2 is either confirmed or corrected in `jev_wire.py` only; fixture record/replay drives the A0 baseline deterministically (two replays produce byte-identical reports) |
+| Phase 0 exit | Conformance test passes for `typesafe` and at least one gateway; the live service matches the documented format in §3.1–3.2 (any drift is fixed in `jev_wire.py` only); fixture record/replay drives the A0 baseline deterministically (two replays produce byte-identical reports) |
 | Phase 2 exit | Router uses `ask_many` with speculative cancellation; ledger feeds decision records |
 | Phase 5 exit | All §6 rows covered by tests; breaker verified across two OS processes; `surf doctor --live` reports provider, model, cold/warm latency, breaker state |
 | Always | No network call from `null`, `fixture` (replay) or when unavailable; judge overhead ≤ 5 ms per request |
@@ -584,23 +592,25 @@ The documented format is already transcribed in §3.1 (verified against the docs
 | Id | Spec says | We do | Why |
 |---|---|---|---|
 | D-07-1 | Sync `Judge.ask/ask_many(..., timeout_ms)` returning mappings (§13.1) | Async protocol + `SyncJudge` facade; `ask_many` returns per-request `JudgeResponse \| JudgeError`; timeout from `CallCtx.deadline` | Speculative walk needs cancellation; partial chunk failure must not discard the successful chunks; one deadline object per route (00 §5) |
-| D-07-2 | Judge client = `typesafe-sdk-python` (pinned) + thin httpx adapters (§22.1) | httpx for every provider at runtime; the SDK is a dev-only dependency used by the conformance test | One wire codec for all providers (isolation), async unknown for the SDK, import cost in a per-prompt hook process. Revisit if the SDK is async, light and exposes the gateways (Q-07-1) |
+| D-07-2 | Judge client = `typesafe-sdk-python` (pinned) + thin httpx adapters (§22.1) | httpx for every provider at runtime; the SDK (`typesafe-sdk`, import `typesafe_sdk`, 0.7.1, MIT) is a dev-only dependency used by the conformance test | Evidence 2026-09-23: the SDK is async and gateway-aware (`base_url` works for OpenRouter and Vercel), but `import typesafe_sdk` costs ~243 ms vs ~129 ms for httpx + pydantic (median of 7 cold runs, Python 3.11) in a per-prompt hook process; it depends on `httpx2`, a second HTTP stack beside httpx; it is pre-1.0 with two breaking minor releases in a week; its own retries (2 retries, 30 s budget) would need disabling for our deadline logic; and debug logging writes request bodies unredacted (14). One small codec in `jev_wire.py` stays simpler |
 | D-07-3 | Fixture judge "replays recorded responses" (§13.2) | Request-level records with question-level keys (`qkeys`) as a fallback, `append`/`rewrite` modes and recorded-latency replay (adopts 16's Q-16-3) | Beam/chunk/frontier changes (A8) replay without new live calls; latency replay keeps deadline behavior deterministic. Assumes questions are independent given state (Q-07-2) |
 | D-07-4 | Breaker "after 3 consecutive failures" (§13.3) | Counted per batch, persisted in `.surf/cache/judge_state.json`, AUTH opens for 600 s | The hook is a fresh process per prompt; per-request counting would open the breaker on one bad route |
 | D-07-5 | Retry on 5xx or timeout | Also retry once on connect errors and on 429 when `Retry-After` fits the deadline; never on other 4xx or malformed | Transient classes only; deterministic failures don't improve on retry |
 | D-07-6 | Thresholds per backend (§13.1) | Per `threshold_profile`, optionally model-qualified (`jev:jev-1.13.0`) | Model upgrades shift calibration |
 | D-07-7 | `null` "returns no decision" | `null` is *unavailable*; router status `judge-unavailable` with reason `null-backend` | One code path for "no judge"; nothing to interpret |
 | D-07-8 | "Concurrency limit: 16 in-flight requests" (§13.3) | Default `judge.max_concurrency` = 8 | TypeSafe documents RPM/TPS limits that change "without notice" and no concurrency limit; its cookbooks cap at 6–8 workers because "the public endpoint rate-limits above roughly eight". Phase 0 measures 8 vs 16 (§8.4) |
+| D-07-9 | Providers include Cloudflare AI Gateway (§13.2) | No `cloudflare` provider in v1; `judge.cloudflare.*` keys removed | Cloudflare AI Gateway has no TypeSafe provider. Jev is only on Workers AI (`/ai/run`, a different envelope, no version pin) or via a user-defined custom provider. Can return later as its own codec |
 
 ### Open questions
 
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
-| Q-07-1 | Use the official SDK at runtime? | No (D-07-2) | SDK inspection in Phase 0: async support, import time, gateway support |
+| Q-07-1 | Use the official SDK at runtime? | No (D-07-2) | Resolved 2026-09-23 by SDK inspection (D-07-2 evidence); revisit if its import cost drops and it reaches 1.0 |
 | Q-07-2 | Are Jev answers independent of co-batched questions? If not, per-question fixtures drift from live | Independent (documented: "Every answer is independent. One question's answer is not hidden context for another. You can add or remove questions without changing the others' results.") | Narrowed to a Phase 0 sanity check: same question in two batches ×20, compared against the same-batch run-to-run spread (SD ≈ 0.01 per the docs); disable the question-level fallback only if the cross-batch gap clearly exceeds that noise |
 | Q-07-3 | HTTP/2 multiplexing (adds `h2`) | Off | The docs don't mention HTTP/2. Conformance latency test: cold-start cost of N parallel TLS handshakes vs one h2 connection |
 | Q-07-4 | Escalating breaker cooldown (60 → 120 → 300 s) on repeated opens | Fixed 60 s | Production decision logs: flapping rate |
 | Q-07-5 | Production answer cache (e.g. repeated walk level 1 for the same request in a session) | None in v1 | Latency data on `extends` routes |
-| Q-07-6 | Exact wire format, gateway model ids, Cloudflare path, and whether OpenRouter/Vercel need a chat envelope | Assumptions in §3.1–3.2 (UNVERIFIED) | Phase 0 conformance test against the live docs/APIs |
+| Q-07-6 | Exact wire format, gateway model ids, Cloudflare path, and whether OpenRouter/Vercel need a chat envelope | Resolved 2026-09-23 from the TypeSafe, OpenRouter and Vercel docs: §3.1–3.2 (all native; Cloudflare dropped, D-07-9) | Phase 0 still checks: whether OpenRouter accepts `jev-1.13.0`, and whether probabilities match TypeSafe direct on a fixed request |
 | Q-07-7 | Cross-process concurrency cap (several sessions × 8) | None | Rate-limit errors (429 share) in decision logs. Limits are per account (1,200 RPM, 250k TPS for `jev-1.13`), so several sessions share one budget |
 | Q-07-8 | Send structured `instructions` (card as a named field, question text referring to it and to `request` by backticked path), as TypeSafe recommends for questions that carry data? | No in v1: `NoulQ.instructions` stays `str` | Wording experiment (16 Q-16-9). If adopted, `instructions: str \| dict[str, str]` in §2.2 and fixture keys change |
+| Q-07-9 | Spec §4 lists only jev-router as unlicensed; blink and jev-knowledge-base have no LICENSE either (shallow clones, 2026-09-23). MIT: jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router, jev-skillful | Update spec §4; copy nothing from the unlicensed three | Owner (spec edit) |

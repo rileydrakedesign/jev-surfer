@@ -2,6 +2,8 @@
 
 **Purpose:** a working checklist for verifying every assumption the design docs make about Jev, TypeSafe's API, the providers, and the agent harnesses. The docs were written in a sandbox that couldn't reach `docs.typesafe.ai`, so these items are marked **UNVERIFIED** or were written from memory.
 
+**Status (2026-09-23):** every row in §1 and §2 now has a result in §3. Items marked unanswerable are live-only and listed in [`jev-reference.md`](jev-reference.md) §15 and 07 §8.4.
+
 **Who uses it:** the agent (or person) doing the cross-referencing pass. It is a starting point, not a complete list. Add a row for anything else you find.
 
 ---
@@ -85,7 +87,7 @@
 | J-D4 | 429 responses carry `Retry-After` | 07 §4.6 | Adjust the retry rule |
 | J-D5 | Price is **$0.042 per million input tokens; output is free** | spec §11.9; 07 §4.8; 13 `judge.price_per_mtok_input` / `_output` | Fix the defaults; recheck the "well under $0.01 per route" goal (spec §1.2) |
 | J-D6 | HTTP/2 support (optional multiplexing) | 07 Q-07-3 | Record the answer |
-| J-D7 | Early-access status, quotas and SLA | spec §20 row "Hosted, early access"; 07 §4.7 breaker | Record them; they affect the breaker defaults only if quotas are tight |
+| J-D7 | confirmed (plus dynamic limits) | Launch blog (typesafe.ai/blog/introducing-system-one-models-and-jev, 2026-09-15): "available today in early access" with a waitlist; OpenRouter (listed 2026-09-18): "no waitlist or separate TypeSafe account". https://docs.typesafe.ai/models: "Rate limits are adjusting dynamically … can change without notice". No SLA in the docs | none; breaker defaults unchanged |
 
 ### E. Providers and gateways (owner: 07 §3.2)
 
@@ -202,7 +204,32 @@ Fill in one row per check. Keep "Evidence" to a URL plus a short quote.
 | J-G2 | unanswerable | Not documented. Related advice: structured option descriptions with `not_for` separate lookalikes (https://docs.typesafe.ai/primitives/advanced) | none; eval decides (09 §4.8) |
 | J-G3 | confirmed (guidance found) | https://docs.typesafe.ai/primitives/noul: "Phrase the question so that a high value means yes … A statement works as well as a question"; backticked state paths; structured instructions; Noul `criteria` | 16 Q-16-9 (candidates only) |
 | J-G4 | confirmed | https://docs.typesafe.ai/models: "English is the primary training language … Other languages, including CJK scripts, are handled but not equally well" | 09 Q-09-12 |
-<!-- rows J-E*, J-F*, J-H*, J-I*, H-* appended below -->
+| J-E1 | corrected | https://openrouter.ai/docs/guides/community/typesafe-sdk: requests go to "`https://openrouter.ai/api/v1/systemone`"; "`jev-1.13` is routed as `typesafe/jev-1.13`"; responses "contain `model`, `answers`, and `usage`" plus `id`, `provider`, `usage.cost`; errors `{"error":{"code","message"}}`, adds 402 | 07 §3.2 (native envelope, id `typesafe/jev-1.13`, 402 → `AUTH`) |
+| J-E2 | corrected | https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe: "`POST /typesafe/v1/systemone`" on `https://ai-gateway.vercel.sh`, `"model": "typesafe-ai/jev"`, "The response uses TypeSafe's field names"; errors `{message, error_type}`; key `AI_GATEWAY_API_KEY` confirmed | 07 §3.2 |
+| J-E3 | corrected → dropped | Cloudflare AI Gateway provider list (developers.cloudflare.com/ai-gateway/llms.txt) has no TypeSafe; Jev is the Workers AI third-party model `typesafe/jev` at `/client/v4/accounts/{id}/ai/run` with body `{"model","input":{…}}` (developers.cloudflare.com/ai/models/typesafe/jev/) | 07 §3.2, D-07-9; 13 (`judge.cloudflare.*`, `CF_AIG_TOKEN` removed) |
+| J-E4 | confirmed (answers, usage); corrected (`model`) | All three document the same `answers` and `usage`. `model` echo differs: `jev-1.13.0` / `typesafe/jev-1.13-20260917` / `typesafe-ai/jev`. Numeric identity across providers unanswerable without keys | 07 §3.2 (`normalize_model`), Q-07-6 Phase 0 item |
+| J-E5 | corrected | TypeSafe pins `jev-1.13.0`; OpenRouter pins minor (`typesafe/jev-1.13`); Vercel `/typesafe/v1/models` lists only `jev` | 07 §3.2; 16 §6 (live eval requires `typesafe`) |
+| J-F1 | corrected | https://pypi.org/pypi/typesafe-sdk/json: `typesafe-sdk` 0.7.1, MIT, Python ≥ 3.10; import `typesafe_sdk`; `typesafe-sdk-python` is the GitHub repo name | 07 D-07-2; `open-questions.md` §1 row 3 (spec §22.1 not edited) |
+| J-F2 | confirmed (facts) | `AsyncTypeSafeClient` exists; `base_url` gateway support (docs sdk/python/usage shows OpenRouter and Vercel); depends on `httpx2`, pydantic, tenacity; measured `import typesafe_sdk` ≈ 243 ms vs httpx + pydantic ≈ 129 ms (7 cold runs, Py 3.11); "request and response bodies are not" redacted in logs | 07 D-07-2 kept with new evidence; Q-07-1 resolved |
+| J-H1 | confirmed | awesome-jev "Open reproductions": "independent efforts, not official TypeSafe releases"; Laya `laya-serve` on `127.0.0.1:8321/v1/systemone`, "degrades past about 20 options"; LitJev "Probabilities are not calibrated by default" | 07 §3.2 `local` notes |
+| J-H2 | confirmed (with caveats) | No published Jev weights. Laya: Apache-2.0 package and HF weights; kev Apache-2.0; open-jev on gated Gemma weights; openjev-sglang no LICENSE | 07 §3.2; jev-reference §14 (A7 uses Laya) |
+| J-I1 | corrected | Shallow clones 2026-09-23: MIT = jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router, jev-skillful; no LICENSE = jev-router, blink, jev-knowledge-base | 07 Q-07-9 (spec §4 needs owner edit) |
+| J-I2 | confirmed | All eight use `criteria`, `noul`, `probabilities`, `confidence`, `usage.input_tokens`; jev-codex-router caps 40 questions; jev-skillful retries {429, 502, 503, 504, 529}; one defaults a missing answer to `noul = 0.0` (anti-pattern) | 07 §4.3/§4.6 already match |
+| H-C1 | confirmed (+ fields) | https://code.claude.com/docs/en/hooks: common fields `session_id`, `transcript_path`, `cwd`, `hook_event_name`, plus `prompt_id`, `permission_mode`, …; pasted text arrives "between a `<pasted_content id=\"…\">` line and a `</pasted_content id=\"…\">` line" | 12 §4.4 input table |
+| H-C2 | confirmed (+ cap) | https://code.claude.com/docs/en/hooks: `hookSpecificOutput.additionalContext`; "capped at 10,000 characters" | 12 §4.4 (9,500-char guard) |
+| H-C3 | corrected | https://code.claude.com/docs/en/hooks: `source` also `fork` ("Before v2.1.214, forked sessions reported source `resume`") | 12 §4.4, §4.4.5 |
+| H-C4 | confirmed | https://code.claude.com/docs/en/hooks SessionEnd reasons `clear`, `resume`, `logout`, `prompt_input_exit`, `other`; "default timeout of 1.5 seconds"; output discarded | 12 §4.4.5 (D-12-5 now required) |
+| H-C5 | confirmed: changes | https://code.claude.com/docs/en/interactive-mode: "Running `/clear` starts a new session" | 12 Q-12-1 resolved; 10 §4 expiry table |
+| H-C6 | unanswerable | https://code.claude.com/docs/en/hooks: transcript "is written asynchronously and may lag … may not yet include the current turn's most recent messages" | 12 Q-12-2 narrowed |
+| H-C7 | partly confirmed | https://code.claude.com/docs/en/sessions: "transcripts as JSONL at `~/.claude/projects/<project>/<session-id>.jsonl`"; per-line schema undocumented; `CLAUDE_CONFIG_DIR` moves `~/.claude` | none (reader already tolerant; use payload `transcript_path` only) |
+| H-C8 | confirmed (1 correction) | https://code.claude.com/docs/en/hooks: event → matcher group → handler; `timeout` in seconds; "All matching hooks run in parallel"; hooks held back until workspace trust | 12 §4.4.6 step 4 |
+| H-C9 | corrected | https://code.claude.com/docs/en/skills: "Custom commands have been merged into skills"; nested `.claude/skills`; https://code.claude.com/docs/en/mcp: scopes `~/.claude.json` (local, user) and `.mcp.json` (project), no `mcpServers` key in settings; https://code.claude.com/docs/en/sub-agents: identity "from the `name` frontmatter field" | 01 Q-01-5 |
+| H-C10 | partly confirmed | https://code.claude.com/docs/en/settings: `enabledPlugins` `"plugin@marketplace": bool`, missing entry → manifest `defaultEnabled`; `installed_plugins.json` schema undocumented | 01 Q-01-2 narrowed |
+| H-O1 | corrected | Codex docs: `~/.codex/config.toml`, trusted-project `.codex/config.toml`; "Custom prompts are deprecated. Use skills"; skills at `.agents/skills` and `~/.agents/skills`; agents `.codex/agents/*.toml` | 01 Q-01-5 |
+| H-O2 | confirmed | cursor.com/docs/mcp: "`.cursor/mcp.json` in your project … `~/.cursor/mcp.json`", key `mcpServers` | none |
+| H-O3 | corrected | opencode.ai/docs/config: plural `agents/`, `commands/`, `skills/` ("Singular names … also supported"); global `~/.config/opencode/opencode.json`; MCP `command` array + `environment` | 01 Q-01-5 |
+| H-M1 | corrected | modelcontextprotocol.io spec 2026-07-28: "remove the `initialize`/`notifications/initialized` handshake"; servers "MUST implement" `server/discover`, whose result carries `instructions`; clients fall back to `initialize` for legacy servers | 02 live listing, 14 §4.1/§4.5 (also aligned page cap to 5) |
+| H-M2 | corrected | github.com/modelcontextprotocol/python-sdk: "FastMCP is now MCPServer … the old import path is gone"; `pip install mcp` installs 2.x | 12 §4.5, Q-12-8 |
 
 ## 4. Done when
 

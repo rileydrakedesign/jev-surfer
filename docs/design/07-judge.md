@@ -571,7 +571,7 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
 | Q-07-1 | Use the official SDK at runtime? | No (D-07-2) | SDK inspection in Phase 0: async support, import time, gateway support |
-| Q-07-2 | Are Jev answers independent of co-batched questions? If not, per-question fixtures drift from live | Assume independent | Phase 0: ask the same question in two different batches ×20; if |Δp| > 0.02 median, disable the question-level fallback |
+| Q-07-2 | Are Jev answers independent of co-batched questions? If not, per-question fixtures drift from live | Assume independent | Phase 0: ask the same question in two different batches ×20; if \|Δp\| > 0.02 median, disable the question-level fallback |
 | Q-07-3 | HTTP/2 multiplexing (adds `h2`) | Off | Conformance latency test: cold-start cost of N parallel TLS handshakes vs one h2 connection |
 | Q-07-4 | Escalating breaker cooldown (60 → 120 → 300 s) on repeated opens | Fixed 60 s | Production decision logs: flapping rate |
 | Q-07-5 | Production answer cache (e.g. repeated walk level 1 for the same request in a session) | None in v1 | Latency data on `extends` routes |

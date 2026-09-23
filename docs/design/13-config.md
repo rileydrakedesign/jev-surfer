@@ -211,7 +211,6 @@ The spec's `deadline_ms` names two budgets (00 §5). It's split into `walk_deadl
 | `router.expand.kind_factors` | `dict[str, float]` | `{co_change=1.0, schema_ref=0.9, defined_in=0.8, fk=0.5, contains=0.6}` | same key set; 0–1 | 04 |
 | `router.expand.max_per_anchor` | int | `8` | per kind; 1–50 | 04 |
 | `router.expand.max_total` | int | `40` | 1–200 | 04 |
-| `router.expand.tables_per_anchor` | int | `3` | 0–10 | 09 |
 | `router.expand.index_names` | `list[Glob]` | `["README","README.*","index.*","_index.md","__init__.py","mod.rs"]` | | 04 |
 
 `[router.pathmatch]` (08)
@@ -282,9 +281,11 @@ Profile keys must match `^(jev|systemone-local|llm|fixture)(:[A-Za-z0-9._-]+)?$`
 | `judge.local.base_url` | str | `"http://127.0.0.1:8080"` | `systemone-local` |
 | `judge.llm.base_url`, `judge.llm.model`, `judge.llm.key_env` | `str \| None` | `None` | required when `backend = "llm"`; `key_env` is an env var **name** `^[A-Z_][A-Z0-9_]*$` |
 | `judge.llm.allow_routing` | bool | `false` | |
-| `judge.fixture.mode` | `Literal["replay","record",…]` (07 §4) | `"replay"` | `SURF_FIXTURE_MODE` overrides |
-| `judge.fixture.dir` | str | `".surf/eval/recordings"` | |
-| `judge.fixture.inner` | str | `"jev"` | backend used in record modes |
+| `judge.fixture.mode` | `Literal["replay","append","rewrite"]` (07 §4.10) | `"replay"` | `SURF_FIXTURE_MODE` overrides |
+| `judge.fixture.miss` | `Literal["fail","null"]` | `"fail"` | 16 sets it from `eval.fixture_miss` |
+| `judge.fixture.simulate_latency` | bool | `true` | |
+| `judge.fixture.path` | str | `".surf/cache/eval-fixtures/"` | 07 §3.5; 16 passes explicit `bench/` paths |
+| `judge.fixture.inner` | str | `"jev"` | live backend used by `append`/`rewrite` |
 
 Breaker state lives in `.surf/cache/judge_state.json` (07 §4.7). It isn't configurable. Keys named `api_key`, `key`, `token`, `secret` or `password` anywhere under `[judge]` are an **error** (D-13-3), and the value is never echoed.
 
@@ -596,7 +597,7 @@ This doc *is* the configuration registry. Every component doc's §5 must list on
 | D-13-5 | §16 sample only | Adds every key the spec uses as a constant and every key introduced by 01–16 (§3) | Spec principle 8; one registry |
 | D-13-6 | §9.5 / §16: `index.commit_catalog = true` | Default `false`; committed baseline via `surf index --baseline` (05 D-05-1, 06 D-06-1; pending user decision Q-06-1) | Hook-driven refresh would otherwise dirty the tree after every commit |
 | D-13-7 | §16: single `.surf/config.toml` | Layered discovery: user, project, project-local, extra, env, CLI | Personal settings shouldn't require editing a committed file |
-| D-13-8 | n/a (design docs disagreed) | Resolved names: `capabilities.user_level` (not `user_configs`, 14); `router.expand.enabled_kinds` (not `router.expand_kinds`, 16); `router.expand.tables_per_anchor` (not `router.expand_tables_per_anchor`, 09); `router.wording.*` (09); `log.max_files` (15); `privacy.redact_patterns` (14); exclude-author substrings (04) | One name per key; the owning component's name wins, and where two owners overlap, the more structured name wins |
+| D-13-8 | n/a (design docs disagreed) | Resolved names: `capabilities.user_level` (not `user_configs`, 14); `router.expand.enabled_kinds` (not `router.expand_kinds`, 16); no `tables_per_anchor` key (09 dropped its own; tables per anchor are bounded by 04's `router.expand.max_per_anchor`); `router.wording.*` (09); `judge.fixture.{mode,miss,simulate_latency,path}` (07, not `fixture.dir`); `log.max_files` (15); `privacy.redact_patterns` (14); exclude-author substrings (04) | One name per key; the owning component's name wins, and where two owners overlap, the more structured name wins |
 
 ### Open questions
 
@@ -607,4 +608,4 @@ This doc *is* the configuration registry. Every component doc's §5 must list on
 | Q-13-3 | `judge.price_per_mtok_input` (07) and `eval.price_per_mtok` (16) overlap. Should eval derive jev's price from `judge.*`? | Yes: `eval.price_per_mtok` only for non-active backends | 07/16 owners |
 | Q-13-4 | Should `router.max_pointers` above 12 be allowed at all? | Up to 30 with a warning | Precision eval |
 | Q-13-5 | Should a user be able to exclude a huge local-only dir without touching the committed config? | Yes, through `.git/info/exclude` (discovery honors git's exclude sources), not surf config | User requests |
-| Q-13-6 | Hook kill switch naming: 06 uses `SURF_SKIP_HOOKS`, 14's hook sketch uses `SURF_HOOK_DISABLE` | `SURF_SKIP_HOOKS` (06 owns the hook block) | 06/14 owners |
+| Q-13-6 | Hook kill switch naming: 06 uses `SURF_SKIP_HOOKS`, 14's hook sketch used `SURF_HOOK_DISABLE` | `SURF_SKIP_HOOKS` (06 owns the hook block) | Resolved: 14 §4.6 now reproduces 06's block |

@@ -25,7 +25,7 @@ Evaluation comes first. Phase 0 must **not** depend on the Phase 1 indexer; it u
 
 | Id | Item | Design doc | Module |
 |---|---|---|---|
-| P0.1 | Choose the 2 target repos (one feature-organized, one layered) and pin them by commit SHA | 16 | `tests/eval-fixtures/manifest` |
+| P0.1 | Choose the 2 target repos (one feature-organized, one layered) and pin them by commit SHA | 16 | `bench/manifest.yaml` |
 | P0.2 | Label 60–100 queries per repo following the protocol; 60/40 dev/test split; second labeler on 20 % | 16 | `.surf/eval/*.yaml` in each target |
 | P0.3 | Dataset models and loader with validation | 16 | `eval/dataset.py` |
 | P0.4 | Judge protocol + `jev` backend + `fixture` (record/replay) + `null` | 07 | `judge/base.py`, `jev.py`, `fixture.py`, `null.py` |

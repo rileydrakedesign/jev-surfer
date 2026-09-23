@@ -109,7 +109,8 @@ class DecisionRecord(BaseModel):
     note_lines: int                               # new: 0 when nothing injected
     lease: LeaseInfo                              # new
     judge: JudgeStats | None
-    latency_ms: LatencyMs                         # {total, call1?, walk?, expand?, final?, overhead?}
+    latency_ms: LatencyMs                         # {total, call1?, walk?, expand?, final?, overhead?, process?}
+                                                  # process = hook process start + imports before routing (12 §7); not in total
     index_head: str | None
     error: ErrorInfo | None = None                # new: {type: "KeyError", where: "route/walk.py:212"}
     truncated: bool = False                       # new: lists were cut to fit record_max_bytes
@@ -405,4 +406,4 @@ Nearest-rank percentile: `sorted(x)[ceil(q·n) − 1]`; `n < 20` prints percenti
 | Q-15-1 | Should `selected` ids be hashed too (paths can reveal what a developer works on)? | No; logs are local, `0600`, gitignored | User feedback / privacy review |
 | Q-15-2 | Windows rotation can fail when another process holds the file open | Retry on next append; if the file reaches 2 × `max_bytes`, open with a new name `decisions.<ulid>.jsonl` and let the reader glob | Windows CI results |
 | Q-15-3 | Log retention by age (e.g. 30 days) in addition to size? | No in v1 | User feedback |
-| Q-15-4 | `RouteTrace` field list (§3.3) must be adopted by 09-router | As listed | 09 review |
+| Q-15-4 | `RouteTrace` field list (§3.3) must be adopted by 09-router | As listed | Resolved: 09 §3.4 implements it (superset) |

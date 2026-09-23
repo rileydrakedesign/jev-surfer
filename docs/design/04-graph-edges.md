@@ -62,11 +62,17 @@ def prefilter(paths: Sequence[str], matcher: Matcher, engine: Literal["rg", "pyt
 def scan_text(text: str, matcher: Matcher) -> dict[SurfaceId, MentionStats]
 def schema_ref_edges(mentions: Mapping[SurfaceId, Mapping[SurfaceId, MentionStats]],
                      n_files: int, cfg: SchemaRefsConfig) -> list[Edge]
-def schema_struct_edges(schema: SchemaModel, tree: Tree, cfg: SchemaConfig) -> list[Edge]  # defined_in, fk, alias
+def schema_struct_edges(schema: SchemaModel, tree: Tree, cfg: SchemaConfig) -> list[Edge]  # defined_in, fk, alias:
+                                                  # validates 03's edge_intents (drops missing endpoints), applies caps
 
 # surf/graph/expand.py
 def expand(anchors: Mapping[SurfaceId, float], store: CatalogReader,
-           cfg: ExpandConfig, *, exclude: Collection[SurfaceId] = ()) -> list[ExpansionCandidate]
+           cfg: ExpandConfig, *, exclude: Collection[SurfaceId] = (),
+           collect_rejected: int = 0) -> tuple[list[ExpansionCandidate], list[ExpansionCandidate]]
+                                   # (admitted, rejected); rejected = top-N below threshold, [] when 0 (09 trace)
+
+# 02's EdgeLookup (top()) and ChurnCounts (file_commits(), dir_commits()) protocols are implemented
+# here over the in-memory build results: edges, CochangeResult.churn and CochangeResult.dir_churn.
 ```
 
 Callers: `index/build.py` (all builders), `index/cards.py` (reads `Tree`, `CochangeResult.churn`, and edges for `tables`, `changes_with`, `coupled_dirs`), `route/pipeline.py` (`expand`), `adapters/mcp_server.py` `surface_info` (edges via store).
@@ -99,6 +105,7 @@ class CochangeResult(BaseModel, frozen=True):
     file_edges: tuple[Edge, ...]      # kind=co_change, from < to
     dir_edges: tuple[Edge, ...]       # kind=dir_coupling, from < to
     churn: Mapping[SurfaceId, int]    # eligible commits touching each file
+    dir_churn: Mapping[SurfaceId, int] # distinct eligible commits touching each dir subtree (02 dir churn)
     stats: CochangeStats              # commits in window, eligible, dropped by filter (for doctor/explain)
 
 class Variant(BaseModel, frozen=True):
@@ -224,7 +231,7 @@ coupling    = round(S(a,b) / sqrt(S(a) · S(b)), 4)                          # f
 - Decay reference is `T_ref`, never wall clock (foundations §4.4).
 - Because `w(c) ∝ exp(ct/τ)`, the reference time cancels in the cosine ratio: coupling depends on `T_ref` only through window membership. That's why "apply decay at read time" (spec §10.2 step 5) needs no special handling: we store raw commits and recompute.
 - Integer sums make accumulation order irrelevant. `exp` may differ by 1 ulp across platforms' libm; the `2**40` quantisation absorbs that except in astronomically rare cases, and `--check` tolerates ±0.0001 on weights (06).
-- `churn[a]` = count of eligible commits with `a ∈ c.current`.
+- `churn[a]` = count of eligible commits with `a ∈ c.current`; `dir_churn[d]` = count of eligible commits touching any file below `d` (distinct commits, not a sum).
 
 #### 4.2.6 Pruning and emission
 
@@ -278,7 +285,7 @@ Non-migration schema sources (`schema.prisma`, `db/schema.rb`) get `defined_in` 
 
 All `code_file` and `doc_file` tree nodes ≤ `index.max_file_bytes`, **excluding schema source files** (migrations, `schema.prisma`, `schema.rb`), which already have `defined_in` edges. `N` = number of scanned files. Decoding: UTF-8 with `errors="surrogateescape"`.
 
-#### 4.4.2 Variants (per table, on the unqualified name `t`)
+#### 4.4.2 Variants (per table, on each unqualified name `t` in 03's `search_names`, which includes a Prisma `model_name`)
 
 | Kind | Text | Mult | Case rule | Boundaries |
 |---|---|---|---|---|
@@ -333,19 +340,21 @@ weight(f,t)  = round(min(1, base(n) · best_mult · spec_norm(t)), 4)
 ### 4.5 Expansion scoring (spec §8.5, query time)
 
 ```python
-def expand(anchors, store, cfg, *, exclude=()):
+def expand(anchors, store, cfg, *, exclude=(), collect_rejected=0):
     anchors = canonicalise(anchors)             # alias: code:<mig> and mig:<mig> share strength (max)
     best: dict[SurfaceId, ExpansionCandidate] = {}
     for a, strength in sorted(anchors.items()):
         for nb, kind, w in neighbours(a, store, cfg):          # see traversal table
             s = w * cfg.kind_factor[kind] * strength
-            if s + 1e-9 < cfg.threshold: continue
+            if s + 1e-9 < cfg.threshold:
+                if collect_rejected: note_rejected(nb, s, a, kind)       # best per id, for the trace
+                continue
             nb = canonical_id(nb)                               # code:<mig path> -> mig:<path>
             if nb in anchors or nb in exclude: continue
             cand = ExpansionCandidate(id=nb, score=s, via_anchor=a, via_kind=kind)
             if better(cand, best.get(nb)): best[nb] = cand     # score desc, KIND_ORDER, anchor id asc
     out = sorted(best.values(), key=lambda c: (-c.score, c.id))
-    return out[: cfg.max_total]
+    return out[: cfg.max_total], top_rejected(collect_rejected)  # (admitted, rejected); 09 passes 20
 ```
 
 **Traversal table** (per anchor; `max_per_anchor` applies per kind after sorting by weight desc, id asc):
@@ -393,7 +402,7 @@ def expand(anchors, store, cfg, *, exclude=()):
 | `index.schema_refs.max_files_per_table` | int | 200 | |
 | `index.schema_refs.min_weight` | float | 0.05 | new |
 | `index.schema_refs.engine` | `auto\|rg\|python` | `auto` | `auto` = rg if on PATH |
-| `router.thresholds.<backend>.expand` | float | 0.30 | spec §16 |
+| `router.thresholds.<profile>.expand` | float | 0.30 | spec §16 |
 | `router.expand.kind_factors` | table | §4.5 values | |
 | `router.expand.enabled_kinds` | list | all five | ablations |
 | `router.expand.max_per_anchor` | int | 8 | per kind; new (Q-04-5) |
@@ -481,7 +490,7 @@ All of it fits inside the Phase 1 exit budget (full index < 60 s for 5k files).
 3. rg / python parity test passes.
 4. On the `layered` fixture, a cross-layer query's `must_include` service file is reachable by depth-1 expansion from the controller anchor (supports the Phase 3 exit: reduced "walk" losses on cross_layer).
 5. Ablations A2–A5 can be run purely through `router.expand.enabled_kinds` and a `coupled_dirs` card toggle (02).
-6. No edge references an id missing from the catalog (referential-integrity check in `store.write`).
+6. No edge references an id missing from the catalog (referential-integrity check in 05's `write_catalog`).
 
 ---
 

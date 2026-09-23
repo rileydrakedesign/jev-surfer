@@ -264,7 +264,7 @@ Hook entries written:
 Algorithm (via `_jsonfile.py`):
 
 1. Read the file. Missing → start from `{}`. Invalid JSON (comments, trailing commas) → **abort this step** with an actionable error; never rewrite a file surf can't parse.
-2. Back up the original bytes to `.surf/cache/backups/<basename>.<utc>.bak` (first install only; re-installs don't create new backups).
+2. Back up the original bytes to `<git-common-dir>/surf/backups/<basename>.<utc>.bak` (non-git: `.surf/cache/backups/`, §3.2) (first install only; re-installs don't create new backups).
 3. For each event, remove existing **surf-owned** hook commands, identified by a command whose first word's basename is `surf-hook`, or which contains `surf-hook ` inside the shared wrapper, or which starts with `surf hook claude`. Drop matcher groups left empty by that removal. Don't touch other groups or keys.
 4. Append one surf group per event (after existing groups, so user hooks run first).
 5. Serialize preserving key order, the detected indent (2/4 spaces or tab) and trailing newline; write atomically.
@@ -477,7 +477,7 @@ Exit: 0 when there are no errors (warnings allowed); 4 when any error; with `--s
 | `surf refresh` | incremental (06) | `--changed` \| `--full`, `--background`, `--reason R`, `--quiet`, `--json`; hook args pass through | 0 (also when another refresh holds the lock: `"skipped":"busy"`); 3; 5; 1 |
 | `surf route "<prompt>"` | route one prompt | `--session ID`, `--previous TEXT`, `--stdin` (prompt from stdin; also when the prompt arg is `-`), `--json`, `--explain`, `--judge NAME`, `--no-lease`, `--strict` | **0 for every `RouteStatus`** (fail-open); 2 usage; with `--strict`: 3 for `index-missing`, 8 for `judge-unavailable`, 1 for `error` |
 | `surf mcp` | MCP server (§4.5) | `--http`, `--host`, `--port`, `--allow-remote`, `--check` (start, self-list tools, exit) | 0; 1 on bind/startup failure; 3 |
-| `surf eval` | evaluation (16) | `--set dev|test`, `--judge`, `--ablate`, `--json`, `--record` | 0; 4 regression gate failed (spec §17.7); 8 judge unavailable |
+| `surf eval` | evaluation (16) | `--set dev|test`, `--judge`, `--ablate`, `--json`, `--record` | 0; 2 usage or hygiene refusal; 3 dataset missing or invalid; 4 gate failed (regression spec §17.7, fixture miss, invalid run); 8 judge unavailable (16 §2.1) |
 | `surf stats` | decision-log aggregates (15) | `--since`, `--json` | 0; 3 |
 | `surf doctor` | health checks (§4.11) | `--live`, `--strict`, `--json` | 0, 4 |
 | `surf status` | runtime state | `--session ID`, `--json` | 0; 3 |
@@ -494,7 +494,7 @@ Exit code table:
 | 0 | success (includes fail-open route statuses and busy refreshes) |
 | 1 | unexpected error |
 | 2 | usage error (typer default) |
-| 3 | not initialized / index missing |
+| 3 | not initialized / index missing (`eval`: dataset missing or invalid) |
 | 4 | a check failed (`index --check`, `doctor`, eval gate) |
 | 5 | configuration invalid |
 | 7 | aborted by the user |
@@ -654,6 +654,7 @@ The spec's latency targets (§1.2, §11.9) are **engine** targets. Hook wall tim
 | D-12-6 | §15.7 command list | Adds `surf stats` (spec §18.2), `surf config`, hidden `surf hook`; adds `--strict`, `--stdin`, `--previous`, `--no-lease`, `--dry-run`, `--purge` | Needed for scripting, debugging and safe uninstall |
 | D-12-7 | §15.2: MCP `route_context` output `{status, note, selection, continuity, route_id}` | Same fields plus `note_kind`, `continuity_reason`, `low_confidence`, `session_id`, `lease`, `latency_ms`, and a text content block with the note | The agent reads text; scripts read structure |
 | D-12-8 | not specified | `surf off` scopes: project (per clone, gitignored) and session; team-wide off is `judge.backend = "null"` | Nothing in `cache/` is committed |
+| D-12-9 | §1.2 latency targets (p50 ≤ 1.5 s new task, ≤ 0.5 s continuing), delivery path unspecified | Treated as **engine** targets (`latency_ms.total`); hook process start and imports are budgeted separately (§7) and logged as `latency_ms.process`; the 3 s hard deadline still counts from process start | Python start-up is outside the router's control and differs per harness; pending owner confirmation (open-questions.md) |
 
 ### Open questions
 

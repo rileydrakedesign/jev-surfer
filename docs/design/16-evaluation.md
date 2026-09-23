@@ -48,7 +48,7 @@ surf eval baseline --promote RUN_DIR --as NAME
 surf eval fixtures check|prune [--bench NAME|all]
 ```
 
-Exit codes: 0 ok; 1 gate failed (regression, fixture miss, invalid run); 2 usage or hygiene refusal; 3 dataset invalid.
+Exit codes (12 §4.12.2 table): 0 ok; 2 usage or hygiene refusal; 3 dataset missing or invalid; 4 gate failed (regression, fixture miss, invalid run); 8 judge unavailable (live runs).
 
 ### 2.2 Python
 
@@ -87,7 +87,7 @@ def split(items, *, ratio: float, seed: int) -> tuple[list[Item], list[Item]]: .
 def agreement(a: Dataset, b: Dataset, cat: CatalogReader | None) -> AgreementReport: ...
 ```
 
-The runner calls the production pipeline: `route.pipeline.route(req, *, config, catalog, judge, lease, clock, explain=True, on_route_done=...)`. It never re-implements routing, except `eval/flat.py` in Phase 0 (§4.1).
+The runner calls the production pipeline with 09's signature: `route.pipeline.route(req, ctx, explain=True, enabled=True, on_route_done=...)`, where `ctx` is a `RouterContext` (09 §2) built by the runner from the eval config, catalog, judge stack, lease manager (or `None`) and clock; `on_route_done` receives the trace for decision records. It never re-implements routing, except `eval/flat.py` in Phase 0 (§4.1).
 
 ---
 
@@ -222,9 +222,9 @@ Each ablation is a partial config (13-config keys) deep-merged over the effectiv
 
 ```yaml
 A0: { router: { mode: flat } }                       # all content cards, chunked, final wording
-A1: { router: { expand_kinds: [] } }                 # walk only
-A2: { router: { expand_kinds: [contains] } }
-A3: { router: { expand_kinds: [contains, co_change] } }
+A1: { router: { expand: { enabled_kinds: [] } } }                 # walk only
+A2: { router: { expand: { enabled_kinds: [contains] } } }
+A3: { router: { expand: { enabled_kinds: [contains, co_change] } } }
 A4: {}                                               # full v1 = defaults
 A5: { index: { cards: { coupled_dirs: false } } }    # changes cards -> per-config catalog rebuild
 A6: { judge: { backend: llm } }                      # uses router.thresholds.llm (tuned first, §4.8)
@@ -236,12 +236,12 @@ A8:
     router.beam_max: [3, 6, 10]
 ```
 
-These need three config keys that the spec lacks. They must be added by 13-config and honored by 09/02 (Q-16-8):
+These need three config keys that the spec lacks. They are defined in 13-config (`router.expand.enabled_kinds` is 04's key) and honored by 09/04/02 (Q-16-8):
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `router.mode` | `"auto" \| "flat"` | `"auto"` | `auto` = small-repo or walk by `small_repo_cutoff`; `flat` = A0 |
-| `router.expand_kinds` | list[EdgeKind] | `[contains, co_change, schema_ref, defined_in, fk]` | Edge kinds used in expansion (§11.6 "tables from code" counts as `schema_ref`) |
+| `router.expand.enabled_kinds` | list[EdgeKind] | `[contains, co_change, schema_ref, defined_in, fk]` | Edge kinds used in expansion (§11.6 "tables from code" counts as `schema_ref`) |
 | `index.cards.coupled_dirs` | bool | `true` | Render `coupled_dirs` on dir cards |
 
 A4 includes `defined_in` and `fk` with schema refs (D-16-10).
@@ -418,14 +418,14 @@ Guard: A0 on a repo with more than `eval.a0_max_cards` content cards refuses wit
 3. Resolve the catalog: `--cards catalog` requires `surf index --check`-level freshness against the checkout HEAD, else it runs `surf index` (bench) or refuses with a hint (user repos). Overlays touching `index.*` build their own catalog under `catalogs/<config>/`.
 4. Build the judge stack: `base = make_judge(cfg)` → `MemoJudge(base)` (run-scoped, keyed by the §3.7 hash) → `RecordingJudge` when `--record`. With `--judge fixture`: `FixtureJudge(path, miss=eval.fixture_miss, simulate_latency=True)`.
 5. For each config, for each unit sorted by id, with `eval.concurrency_live` (default 1) or `eval.concurrency_fixture` (default 8) workers:
-   `route(RouteRequest(request=item.query, session_id=None, previous_message=item.previous_message), explain=True, lease=None)` with `lease.enabled=false` for single queries (no continuity question).
+   `route(RouteRequest(request=item.query, session_id=None, previous_message=item.previous_message), ctx, explain=True)` with `ctx.leases=None` (and `lease.enabled=false`) for single queries (no continuity question).
 6. Score each row (§4.4), attribute misses (§4.6), then aggregate (§4.5) and bootstrap (§4.7).
 7. Compare: each config against `A4` if present, else against the first config, plus `--compare` target.
 8. Write `run.json`, `report.md`, `items.jsonl`. Ctrl-C writes a partial report with `complete=false`.
 
 `MemoJudge` means identical requests inside one invocation are answered once. Across ablations and sweep points this cuts cost and makes paired comparisons share judge noise on shared requests, which is what a paired test wants.
 
-**Clock.** Eval passes a `HybridClock`: `now()` (lease idle) is simulated; `monotonic()` (deadlines, latency) is real in live mode, and simulated in fixture mode, where `FixtureJudge` advances it by each request's recorded `latency_ms` (the max over a parallel `ask_many` batch). Deadline behavior in replay thus follows the recording (Q-16-3 for 07).
+**Clock.** Eval passes a `HybridClock`: `wall()` (lease idle) is simulated; `monotonic()` (deadlines, latency) is real in live mode, and simulated in fixture mode, where `FixtureJudge` advances it by each request's recorded `latency_ms` (the max over a parallel `ask_many` batch). Deadline behavior in replay thus follows the recording (Q-16-3 for 07).
 
 ### 4.3 Sequence runner
 
@@ -436,8 +436,9 @@ def run_sequence(seq, cfg, env):
     prev, rows = None, []
     for k, turn in enumerate(seq.turns):
         env.clock.advance_wall(minutes=turn.gap_minutes)
+        ctx = env.router_context(cfg, leases=leases)          # RouterContext (09 §2): catalog, judge, clock, …
         res = route(RouteRequest(request=turn.query, session_id=sid, previous_message=prev),
-                    config=cfg, lease=leases, explain=True, clock=env.clock, judge=env.judge)
+                    ctx, explain=True, on_route_done=env.on_route_done)
         lease = leases.get(sid)
         sel = lease.selection if lease else (res.selection or Selection.empty())
         rows.append(RowResult(row_key=f"{seq.id}#{k}", unit_id=seq.id, selection=sel,
@@ -696,7 +697,7 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | `eval.max_judge_failure_rate` | float | `0.05` | Invalid run above this |
 | `eval.price_per_mtok` | map backend → float | `{jev: 0.042}` | Spec §11.9 |
 | `eval.a0_max_cards` | int | `5000` | §4.1 |
-| `router.mode`, `router.expand_kinds`, `index.cards.coupled_dirs` | see §3.5 | | New keys for ablations |
+| `router.mode`, `router.expand.enabled_kinds`, `index.cards.coupled_dirs` | see §3.5 | | New keys for ablations |
 
 ---
 
@@ -796,9 +797,9 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 |---|---|---|---|
 | Q-16-1 | Is 8 files the right directory-credit limit? | Tie to the collapse limit (`eval.dir_credit_max_files = 8`) | If 09 changes the collapse rule, follow it |
 | Q-16-2 | Live run-to-run noise vs. the 0.03 tolerance | Keep 0.03 but require the paired CI to say `worse` in nightly; measure noise with two live runs in Phase 0 | Phase 0 noise measurement |
-| Q-16-3 | Question-level fixture fallback and replayed latency (`simulate_latency`) belong to 07's `judge/fixture.py` | Adopt both in 07 | 07 review |
+| Q-16-3 | Question-level fixture fallback and replayed latency (`simulate_latency`) belong to 07's `judge/fixture.py` | Adopt both in 07 | Resolved: 07 D-07-3 |
 | Q-16-4 | The regen workflow runs PR code with the judge API key | Maintainer label only, same-repo branches only, a budget-capped eval-only key | Maintainer decision |
 | Q-16-5 | Test set is 24–40 queries per repo → recall CI width ≈ ±0.1; the 0.85 target is weakly tested | Headline test metric pooled across both repos (cluster bootstrap by item), per-repo also shown | User decision |
 | Q-16-6 | Heimdall: license and pin | Record SPDX in the manifest; replace if clone-in-CI isn't allowed | Legal check in Phase 0 |
 | Q-16-7 | Minimum inter-labeler agreement for a dataset to be usable | Report only; flag if mean `must_f1 < 0.7` | Phase 0 experience |
-| Q-16-8 | New keys `router.mode`, `router.expand_kinds`, `index.cards.coupled_dirs`, and pure `route/select.py` over a trace | Adopt in 13 and 09 | 09/13 review |
+| Q-16-8 | New keys `router.mode`, `router.expand.enabled_kinds`, `index.cards.coupled_dirs`, and pure `route/select.py` over a trace | Adopt in 13 and 09 | Resolved: 13 §3, 09 §2 (`route/select.py`) |

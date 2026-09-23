@@ -1,0 +1,278 @@
+# Open questions and proposed spec deviations
+
+**Status:** consolidated 2026-09-23 after the cross-doc consistency pass.
+**Sources:** §10 of every doc in [`design/`](design/), plus the id-scheme resolutions (F1–F4), D-F5, D-F6, Q-F1 and Q-F7 in [00 · Foundations](design/00-foundations.md).
+**Reference for intent:** [`spec/architecture-v1.md`](spec/architecture-v1.md). Nothing here changes the spec until the owner accepts it and the spec's decision log records it.
+
+How to use this file (see [README](README.md#how-to-change-things)):
+
+- When a question is answered, set its status to **resolved** with the date and the evidence, then update the affected docs.
+- When a deviation is accepted, set it to **accepted**, edit the spec and add a row to its decision log.
+- New `D-NN-k` / `Q-NN-k` rows in a design doc get mirrored here.
+
+Sections: [1. Decisions needed from the project owner](#1-decisions-needed-from-the-project-owner) · [2. Proposed spec deviations](#2-proposed-spec-deviations) · [3. Open questions resolved by evaluation](#3-open-questions-resolved-by-evaluation) · [4. Other open questions](#4-other-open-questions)
+
+---
+
+## 1. Decisions needed from the project owner
+
+Product, policy and workflow choices that evaluation can't settle. Ordered by priority: rows 1–5 block Phase 0 or the Phase 1 layout; the rest block release. Each row is proposed-default-unless-overruled.
+
+| # | Question (ids) | Options | Proposed default and rationale | Affects |
+|---|---|---|---|---|
+| 1 | Default catalog commit policy ([Q-06-1](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions); D-05-1, D-06-1, D-13-6) | (a) local-only; (c′) committed baseline refreshed only by `surf index --baseline`; (b) pre-commit hook rewrites the committed catalog; (d) CI bot commits it | (a) as the default, (c′) opt-in, (d) as a documented recipe, (b) rejected. Committing by default makes every post-commit hook dirty the tree, puts a self-referential `index_head` in history, causes merge conflicts, and shallow CI clones can't reproduce co-change. **Spec change if accepted:** §9.5 "Default: commit" becomes "Default: `index.commit_catalog = false`; the catalog lives in `.surf/cache/`; teams may opt in to a committed baseline"; §16 sample `commit_catalog = false`; §10.1 CI `--check` applies to committed mode only; spec §25 Q5 closed | [00 §4.1](design/00-foundations.md#41-commit-policy-and-the-local-only-overlay-amended-after-01050614), [05](design/05-catalog-store.md), [06](design/06-refresh.md), [12](design/12-delivery.md), [13](design/13-config.md) |
+| 2 | Target repos for evaluation ([Q-16-6](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions); spec §17.2, §23 Phase 0) | Heimdall (layered) + a second **real** feature-organized repo; Heimdall + synthetic `feature-shop` only; two other real repos | Heimdall plus one real feature-organized repo picked by the owner, both pinned by SHA with SPDX license recorded in `bench/manifest.yaml`; synthetic repos only for CI speed and adversarial plants. Need from the owner: the second repo, confirmation that both licenses allow cloning in CI, and who labels (second labeler on 20 %). The current manifest has only one real repo, which weakens the "real repos carry most queries" rule | [16](design/16-evaluation.md), [07](design/07-judge.md) (fixtures), build plan P0.1–P0.2 |
+| 3 | Can the Jev wire format be verified, and runtime SDK or httpx? ([Q-07-6](design/07-judge.md#10-deviations-from-the-spec-and-open-questions), [Q-07-1](design/07-judge.md#10-deviations-from-the-spec-and-open-questions), D-07-2) | Owner provides API docs access and a TypeSafe key (plus one gateway) for a Phase 0 conformance test; or verify through the SDK only; runtime client: `typesafe-sdk-python` (spec §22.1) or httpx | Every wire and provider detail in 07 §3.1–3.2 is UNVERIFIED because docs.typesafe.ai is unreachable from the dev sandbox. Default: a Phase 0 conformance test with a real key; any correction stays inside `judge/jev_wire.py`. Runtime client: httpx for all providers, SDK as a dev-only dependency that cross-checks encoding. Rationale: one codec for every provider, async support, hook import cost. **Spec change if accepted:** §22.1 dependency list | [07](design/07-judge.md), [00 §6](design/00-foundations.md#6-repository-and-code-conventions) |
+| 4 | PyPI distribution name ([Q-F1](design/00-foundations.md#6-repository-and-code-conventions), [Q-12-7](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions)) | `jev-surfer`; `surfer-cli` or another neutral name; `surf` (very likely taken) | `jev-surfer` (import `surf`, console scripts `surf` and `surf-hook`), unless row 5 drops "Jev" from the name, in which case pick the neutral name now so it isn't renamed after release. Needed before build-plan P-1.1 (`pyproject.toml`) | [00 §6](design/00-foundations.md#6-repository-and-code-conventions), [12](design/12-delivery.md) |
+| 5 | Project name, trademark and non-affiliation wording ([Q-14-5](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions); spec §0.1) | Keep "Jev Surfer"; ship as "Surfer"; ask TypeSafe first | Check TypeSafe's naming and brand guidelines before any public release; until then keep "Jev Surfer" internally. Use the 14 §4.10 non-affiliation text in the README ("independent community project … not affiliated with, endorsed by, or sponsored by TypeSafe AI"). Owner decides the name and approves the wording | [14 §4.10](design/14-security-privacy.md), [00 §6](design/00-foundations.md#6-repository-and-code-conventions), README |
+| 6 | Are the spec §1.2 latency targets engine-only or end-to-end? ([D-12-9](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions)) | Engine only (`latency_ms.total`, what `surf eval` measures); end-to-end including Python hook start-up and imports (adds ≈ 200–300 ms p95); both, with separate targets | Engine targets (p50 ≤ 1.5 s new task, ≤ 0.5 s continuing), plus a separate hook overhead budget (≤ 200 ms p50 / 300 ms p95 before routing; ≤ 100 ms p95 for fast exits), logged as `latency_ms.process`. The 3 s hard deadline counts from process start either way. End-to-end would make the continuing-task target nearly unreachable for a per-prompt Python process | [12 §7](design/12-delivery.md), [15](design/15-observability.md), [16](design/16-evaluation.md), spec §1.2/§11.9 |
+| 7 | When the judge is unavailable, emit path hits as un-judged pointers? ([Q-F7](design/00-foundations.md#5-error-model-fail-open-always); D-09-19) | No note (current); emit exact-path hits only, marked unverified; emit all path hits | No note. A path hit is strong evidence, but an un-judged pointer breaks the "every pointer was judged" contract and the note has no unverified marker; stack-trace prompts already contain the paths. Revisit if decision logs show frequent `judge-unavailable` on stack-trace prompts | [00 §5](design/00-foundations.md#5-error-model-fail-open-always), [09](design/09-router.md), [11](design/11-note.md) |
+| 8 | Privacy defaults for text sent to the judge and stored locally ([Q-14-3](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions), [Q-14-2](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions), [Q-10-4](design/10-lease.md#10-deviations-from-the-spec-and-open-questions)) | Emails: redact / keep. 40-hex git SHAs: redact / keep. Lease keeps the redacted request text (≤ 2,000 chars, gitignored cache) / keeps only a hash | Redact emails (`privacy.redact_emails = true`, opt-out available) and SHAs (keys are often hex; SHAs don't help routing); the lease keeps redacted request text because continuity needs it, and the privacy statement says so. These are defaults the privacy statement (spec §19.1) will promise publicly, so the owner should sign off | [14](design/14-security-privacy.md), [10](design/10-lease.md), [13 §3.8](design/13-config.md) |
+| 9 | Test-set size and headline metric ([Q-16-5](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions)) | 24–40 test queries per repo (spec 60–100 total, 60/40 split) with per-repo CIs; label more (≈ 60+ test queries per repo); pool both repos for the headline | Pool both repos for the headline test metric (cluster bootstrap by item) and show per-repo numbers. With 24–40 queries per repo the recall CI is about ±0.1, so the 0.85 target is only weakly tested per repo. Labeling more is the better fix if the owner can budget it | [16](design/16-evaluation.md), build plan P0.2 |
+| 10 | Fixture-regeneration workflow runs PR code with the judge API key ([Q-16-4](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions)) | Maintainer-labelled, same-repo branches only, with a budget-capped eval-only key; maintainers regenerate locally; no automated regeneration | Maintainer label, same-repo branches only, budget-capped eval-only key. Keeps fork PRs away from secrets while keeping fixtures cheap to refresh | [16 §4.10](design/16-evaluation.md), [07](design/07-judge.md) |
+
+## 2. Proposed spec deviations
+
+Every `D-` row from the design docs, plus 00's id-scheme resolutions F1–F4 and D-F5/D-F6. The doc's §10 row has the full "spec says / we do / why". Status stays **proposed** until the owner accepts it and the spec decision log records it.
+
+| Id | Doc | Summary | Status |
+|---|---|---|---|
+| [F1](design/00-foundations.md#23-resolved-ambiguities-in-the-id-scheme) | 00 | Schema root id is `db:*` | proposed |
+| [F2](design/00-foundations.md#23-resolved-ambiguities-in-the-id-scheme) | 00 | Directory prefix by stable >50 % docs rule; identity comparisons by path, not prefix | proposed |
+| [F3](design/00-foundations.md#23-resolved-ambiguities-in-the-id-scheme) | 00 | Migration file: one tree node `code:<path>` plus an out-of-tree `mig:<path>` card linked by `alias` | proposed |
+| [F4](design/00-foundations.md#23-resolved-ambiguities-in-the-id-scheme) | 00 | File prefix by file type, never by location | proposed |
+| [D-F5](design/00-foundations.md#4-determinism-rules-for-surf) | 00 | `indexed_at` dropped from card records (determinism) | proposed |
+| [D-F6](design/00-foundations.md#4-determinism-rules-for-surf) | 00 | Co-change recency measured from the indexed commit, not wall clock | proposed |
+| [D-01-1](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | 01 | Untracked files and user-level capability sources go to a local overlay, never the committed catalog | proposed |
+| [D-01-2](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | 01 | `*credentials*` / `*secret*` exclude only non-source-code files | proposed |
+| [D-01-3](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | 01 | Capability definition dirs (`.claude/skills/` etc.) excluded from the content tree | proposed |
+| [D-01-4](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | 01 | Extra excludes: linguist attributes, generated-code headers, more tool caches | proposed |
+| [D-01-5](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | 01 | Oversize files keep a path-only card | proposed |
+| [D-01-6](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | 01 | Codex config paths updated to the current layout | proposed |
+| [D-01-7](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | 01 | Paths with control, newline or bidi characters always excluded at discovery | proposed |
+| [D-02-1](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | Token budgets use `ceil(utf8_bytes / 4)` | proposed |
+| [D-02-2](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | Churn buckets from absolute filtered commit counts; not rendered in card text | proposed |
+| [D-02-3](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | Card `hash` covers intrinsic inputs only; edge-derived data affects `card` text only | proposed |
+| [D-02-4](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | Doc title: frontmatter `title` before first H1 | proposed |
+| [D-02-5](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | Live MCP listings persisted to `.surf/mcp-listings.json`; index never lists servers | proposed |
+| [D-02-6](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | MCP cards record only a package token or URL host, never args, env or full URL | proposed |
+| [D-02-7](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | One card per capability id across harnesses; precedence plus `conflict` flag | proposed |
+| [D-02-8](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | 02 | Directory hash is a Merkle hash over children | proposed |
+| [D-03-1](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | 03 | A schema snapshot (Prisma, `schema.rb`, `structure.sql`) defines the table set; migrations give provenance | proposed |
+| [D-03-2](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | 03 | Views are `db_table` cards with `fields.kind = view` | proposed |
+| [D-03-3](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | 03 | External stub cards for referenced but undefined tables (e.g. `auth.users`) | proposed |
+| [D-03-4](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | 03 | `defined_in` capped at creator + 3 most recent alters (aligned with D-04-5) | proposed |
+| [D-03-5](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | 03 | Migration order from tool-specific version keys, never mtime or git time | proposed |
+| [D-03-6](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | 03 | `mig:` cards have `parent = None` and no `contains` edge | proposed |
+| [D-03-7](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | 03 | Django models: detection and report only | proposed |
+| [D-04-1](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | `contains` edges not stored; derived from `Card.parent` | proposed |
+| [D-04-2](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | Co-change decay uses a true half-life (`exp(−t·ln2/H)`) | proposed |
+| [D-04-3](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | Committer time (`%ct`) instead of author time | proposed |
+| [D-04-4](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | Co-change pair kept if in either endpoint's top-K; stored once (`from < to`) | proposed |
+| [D-04-5](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | `defined_in`: creating migration + 3 most recent alters | proposed |
+| [D-04-6](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | Schema-ref specificity normalised by the df = 1 value | proposed |
+| [D-04-7](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | Co-change window defined over the ordered commit set, not `git log --since` | proposed |
+| [D-04-8](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | No comment stripping in schema-ref scanning in v1 | proposed |
+| [D-04-9](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | 04 | Schema source files excluded from schema-ref scanning | proposed |
+| [D-05-1](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | 05 | Default `index.commit_catalog = false`; committed baseline is opt-in | proposed |
+| [D-05-2](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | 05 | `index.sqlite` is an immutable snapshot replaced atomically; mutable state in `build.sqlite` | proposed |
+| [D-05-3](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | 05 | `meta.json` stores full commit hash plus fingerprints, dirty flag, co-change status, file digests | proposed |
+| [D-05-4](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | 05 | No `indexed_at` in card records (D-F5) | proposed |
+| [D-05-5](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | 05 | Router always reads `.surf/cache/`; committed files are only a baseline | proposed |
+| [D-06-1](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | 06 | Hooks refresh only `cache/`; committed baseline changes only via `surf index --baseline` | proposed |
+| [D-06-2](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | 06 | Change detection by content-addressed caches keyed on blob ids | proposed |
+| [D-06-3](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | 06 | SessionStart waits up to 3 s for a background refresh that is never cut short | proposed |
+| [D-06-4](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | 06 | Re-render all cards on every refresh | proposed |
+| [D-06-5](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | 06 | `--check` freshness = no indexed-path change since `index_head` plus rebuild; exit 4 mismatch, 9 cannot verify | proposed |
+| [D-06-6](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | 06 | Per-hook-manager install rules; shared manager configs never edited except husky (with consent) | proposed |
+| [D-07-1](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | 07 | Async judge protocol with per-request results and a deadline object; `SyncJudge` facade | proposed |
+| [D-07-2](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | 07 | httpx for every provider at runtime; TypeSafe SDK is dev-only (spec §22.1) | proposed |
+| [D-07-3](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | 07 | Fixture judge: request-level records with question-level fallback, append/rewrite modes, latency replay | proposed |
+| [D-07-4](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | 07 | Breaker counts failed batches, persisted in `judge_state.json`; auth failures open for 600 s | proposed |
+| [D-07-5](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | 07 | Retry once also on connect errors and on 429 within the deadline | proposed |
+| [D-07-6](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | 07 | Thresholds per threshold profile, optionally model-qualified | proposed |
+| [D-07-7](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | 07 | `null` backend means judge unavailable | proposed |
+| [D-08-1](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Four path-hit strengths (SUFFIX, TAIL, BASENAME/CONTEXT, FOLD) instead of two | proposed |
+| [D-08-2](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Directory mentions and extensionless build files are matched | proposed |
+| [D-08-3](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Paths with spaces matched only in quoted or known-trace contexts | proposed |
+| [D-08-4](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | JVM frames mapped from package names to paths | proposed |
+| [D-08-5](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Ambiguous basename becomes a candidate only if ≤ 5 matches | proposed |
+| [D-08-6](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Framework frames dropped before lookup; test frames demoted with one reserved slot | proposed |
+| [D-08-7](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Case-insensitive fallback only when the case-sensitive pass finds nothing | proposed |
+| [D-08-8](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Path matching runs on the raw prompt before redaction (outputs ids only) | proposed |
+| [D-08-9](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | 08 | Production path lookup uses 05's SQLite suffix tables; trie is the test reference | proposed |
+| [D-09-1](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | `deadline_ms` split into `walk_deadline_ms` (2000) and `route_deadline_ms` (3000) | proposed |
+| [D-09-2](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | All probability thresholds in `router.thresholds.<profile>`; `beam_min` added | proposed |
+| [D-09-3](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Level-1 walk requests are speculative; selection waits for call 1 | proposed |
+| [D-09-4](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Path hits exclude only the hit file nodes from the walk | proposed |
+| [D-09-5](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | `same` becomes `extends` when path hits fall outside the lease | proposed |
+| [D-09-6](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Low `needs_context` with path hits: walk skipped, hits + expansion go to the final pass | proposed |
+| [D-09-7](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Walk chunks aggregated per node before threshold and beam | proposed |
+| [D-09-8](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Dead-end guard once per level under strict conditions | proposed |
+| [D-09-9](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Directories at `max_depth` admitted as directory candidates | proposed |
+| [D-09-10](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | `max_frontier = 12` caps walk fan-out | proposed |
+| [D-09-11](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | All call-1 questions balanced-chunked in small-repo mode | proposed |
+| [D-09-12](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Final pass split in two only above 6,000 estimated tokens | proposed |
+| [D-09-13](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Ambiguous path candidates are pool tier 3 | proposed |
+| [D-09-14](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Pool maps `code:` migration ids to `mig:` | proposed |
+| [D-09-15](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | On `extends`, leased items excluded from the pool but kept as anchors | proposed |
+| [D-09-16](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Capability lines capped (6 use, 10 skip) | proposed |
+| [D-09-17](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | No lease update on `deadline` or `judge-unavailable` | proposed |
+| [D-09-18](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Directory collapse counts direct files, one pass, drops redundant ancestors | proposed |
+| [D-09-19](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Unjudged path hits dropped (consistent with Q-F7) | proposed |
+| [D-09-20](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | Call-1 context keys never added to walk state | proposed |
+| [D-09-21](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 09 | `select(trace, params)` is a pure function over the trace | proposed |
+| [D-10-1](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | 10 | Missing continuity answer with a lease → `extends` | proposed |
+| [D-10-2](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | 10 | Lease staleness detected at load by card-hash comparison; refresh never touches leases | proposed |
+| [D-10-3](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | 10 | Empty `extends` delta injects no note | proposed |
+| [D-10-4](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | 10 | Lease record gains version, task id, last request, fingerprints, per-item gen/rank/hash, rev | proposed |
+| [D-10-5](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | 10 | Path hits outside the lease force `extends` | proposed |
+| [D-10-6](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | 10 | Lease ordering `(generation desc, rank asc, id asc)` with directory subsumption and tail eviction | proposed |
+| [D-11-1](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | 11 | Note labels padded to 8 characters in every note kind | proposed |
+| [D-11-2](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | 11 | Adds a capability-only note format | proposed |
+| [D-11-3](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | 11 | Note overflow: wrap at 160 chars, deterministic drop order, `(+N more not shown)` | proposed |
+| [D-11-4](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | 11 | Delta notes may add `use` capabilities, never `skip` lines | proposed |
+| [D-11-5](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | 11 | Root hint when the agent's cwd is a subdirectory | proposed |
+| [D-11-6](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | 11 | Note shows each selected table's latest migration (max 2) | proposed |
+| [D-12-1](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | Uninstall restores a backup only when the file is unchanged; otherwise surgical removal | proposed |
+| [D-12-2](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | Separate `surf-hook` console script with a stdlib-only fast path | proposed |
+| [D-12-3](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | Control-only prompts blocked in Claude Code; `surf reroute: <text>` | proposed |
+| [D-12-4](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | CLAUDE.md snippet skipped when hooks are installed; AGENTS.md created if none exists | proposed |
+| [D-12-5](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | Adds a `SessionEnd` hook to expire the lease | proposed |
+| [D-12-6](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | Extra CLI commands and flags (`stats`, `config`, `--strict`, …) | proposed |
+| [D-12-7](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | MCP `route_context` returns extra fields plus a text block | proposed |
+| [D-12-8](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | `surf off` scopes: per clone and per session; team-wide off via `judge.backend = "null"` | proposed |
+| [D-12-9](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | 12 | Spec §1.2 latency targets treated as engine targets; hook start-up budgeted and logged separately | proposed |
+| [D-13-1](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | `router.deadline_ms` becomes a deprecated alias of `route_deadline_ms` | proposed |
+| [D-13-2](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | Judge retry, limits and breaker constants become config keys | proposed |
+| [D-13-3](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | Secret-like keys in config files are rejected | proposed |
+| [D-13-4](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | Index view (defaults + project file) and per-section config fingerprints | proposed |
+| [D-13-5](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | Every tunable used by the spec or design docs gets a key | proposed |
+| [D-13-6](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | Default `index.commit_catalog = false` (pending Q-06-1) | proposed |
+| [D-13-7](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | Layered config: user, project, project-local, extra, env, CLI | proposed |
+| [D-13-8](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | 13 | One name per key where design docs disagreed | proposed |
+| [D-14-1](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | Prompt hashes are HMAC-SHA256 with a per-checkout salt | proposed |
+| [D-14-2](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | Cards drop secret-bearing items; prompts get `[REDACTED:type]` | proposed |
+| [D-14-3](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | `systemone-local` counts as local only for loopback/private endpoints | proposed |
+| [D-14-4](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | User-level capabilities stored only in `.surf/cache/overlay.jsonl` | proposed |
+| [D-14-5](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | Project-defined MCP servers live-listed only when named individually after a warning | proposed |
+| [D-14-6](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | Deterministic injection filter (R1–R4) for card prose | proposed |
+| [D-14-7](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | Lease stores the redacted request text | proposed |
+| [D-14-8](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | 14 | Secret-like file list extended; basename matching; explicit `index.include` override | proposed |
+| [D-15-1](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | 15 | Decision-log prompt hash is salted HMAC (see D-14-1) | proposed |
+| [D-15-2](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | 15 | Decision record gains fields for stats, failures and debugging | proposed |
+| [D-15-3](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | 15 | Log rotation: 5 files total (≤ 50 MB) | proposed |
+| [D-15-4](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | 15 | Eval decision records go to the run directory | proposed |
+| [D-15-5](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | 15 | `--explain` gains `--json`, `--cards`, `--show-requests`, `--dry-run` | proposed |
+| [D-16-1](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Labels add `capabilities_not_needed`; capability accuracy over labeled capabilities only | proposed |
+| [D-16-2](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Ancestor directory pointers with ≤ 8 files satisfy file/dir labels | proposed |
+| [D-16-3](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Nightly live eval compares dev, not test | proposed |
+| [D-16-4](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Macro recall/precision over rows; cluster bootstrap | proposed |
+| [D-16-5](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Sequence turns count toward recall; delta recall scored separately | proposed |
+| [D-16-6](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Phase 0 bootstrap builder also emits directory entries and regex table cards | proposed |
+| [D-16-7](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Extra failure-attribution buckets | proposed |
+| [D-16-8](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | surf's own benchmark lives in `bench/` with a SHA-pinned external-repo manifest | proposed |
+| [D-16-9](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Each wording compared at its own best `final` threshold | proposed |
+| [D-16-10](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | A4 also enables `defined_in` and `fk` | proposed |
+| [D-16-11](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | Continuity accuracy scored on the effective continuity | proposed |
+| [D-16-12](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | 16 | PR fixture run gates on fixture misses and point regressions | proposed |
+
+## 3. Open questions resolved by evaluation
+
+Tuning and measurement questions. The proposed default ships unless the deciding signal says otherwise; no owner input needed.
+
+| Id | Question | Proposed default | Deciding signal |
+|---|---|---|---|
+| [Q-01-1](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | Should `.svg` and large text data (`*.csv`, `*.json` > 100 KB) be excluded by default? | Keep; rely on `max_file_bytes` | Eval: share of final-pass candidates that are data/asset files |
+| [Q-01-4](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | Should directories that are single-child chains (`a/b/c/` with one child each) be collapsed? | No collapse in v1; the walk's flattening handles small subtrees | Walk depth distribution on target repos |
+| [Q-02-1](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | Is bytes/4 close enough to Jev's real tokenization? | Yes; report real counts in `surf stats` if a tokenizer is available | Measure on target catalogs; switch divisor with a format-version bump if error > 25 % |
+| [Q-02-2](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | Churn thresholds 3/15 (files) | As §4.7 | Distribution on the two target repos |
+| [Q-02-3](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | Should `churn` or line counts appear in card text for Jev? | No | A/B on walk recall (spec §17.6) |
+| [Q-02-6](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | Should a stale live listing still render (with a marker) instead of falling back to static? | Fall back to static | Eval of capability accuracy with stale listings |
+| [Q-03-1](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | Column order on truncated table cards: definition order (spec example) or pk/fk first, then recently added? | Definition order | Eval: final-pass losses on table cards where the relevant column was cut |
+| [Q-03-2](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | Should `COMMENT ON TABLE` text appear on table cards? | No (prose, injection vector) | Adversarial eval + recall on generic table names |
+| [Q-03-3](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | Should views emit edges to base tables (e.g. `fk`-like, weight 0.5)? | No edge in v1; `from:` line on the card | Expansion ablation with vs without |
+| [Q-03-5](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | Should the external stubs list be seeded for Supabase (`auth.users`, `storage.objects`) even when unreferenced? | No, referenced only | Recall on auth-related queries |
+| [Q-04-1](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | Add a PascalCase **plural** variant (`OrderItems`, `getOrderItems`)? | Not in v1 | Eval: schema-ref recall on TS/Java repos (A4 per-table misses) |
+| [Q-04-2](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | Exclude all `[bot]` authors? Some bots (coding agents) make real changes. | Only the three named bots | Inspect bot share of commits on the two eval repos |
+| [Q-04-3](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | `^chore` excludes real work in some conventional-commit repos | Keep the spec default | A3 ablation with and without the message filter |
+| [Q-04-4](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | Strip comments per extension? | No | Eval shows schema_ref false positives from comments |
+| [Q-04-5](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | `max_per_anchor = 8` and `expand = 0.3`. Walk anchors with cumulative score < 0.5 rarely clear 0.3 × kind_factor, so expansion is dominated by path hits and confident walk picks | Keep; report expansion yield per anchor source | A2–A4 ablations and failure attribution |
+| [Q-04-6](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | Should `fk` edges get a weight from FK multiplicity instead of a flat 0.7? | Flat 0.7 | Ablation |
+| [Q-05-1](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | Should `index.sqlite` be patched in place instead of rebuilt, for very large repos (> 50k files)? | Rebuild; revisit if refresh > 3 s is dominated by `build_cache` | Phase 5 refresh timing on the larger eval repo |
+| [Q-07-2](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | Are Jev answers independent of co-batched questions? If not, per-question fixtures drift from live | Assume independent | Phase 0: ask the same question in two different batches ×20; if \|Δp\| > 0.02 median, disable the question-level fallback |
+| [Q-07-3](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | HTTP/2 multiplexing (adds `h2`) | Off | Conformance latency test: cold-start cost of N parallel TLS handshakes vs one h2 connection |
+| [Q-08-1](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | Map compiled paths (`dist/x.js`, `build/x.js`) to sources via naming conventions or source maps | Not in v1 | Eval: share of stack_trace misses whose trace only has `dist/` frames |
+| [Q-08-2](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | Put `:line` in the note for path hits | No (pointers only) | Agent behavior study in Phase 4 |
+| [Q-08-3](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | Should path hits in prose (no trace) be as strong as trace frames? | Same strengths | Eval: precision of prose-mention hits vs trace hits |
+| [Q-08-4](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | Strength constants (1.0/0.9/0.8/× 0.9) | As listed | A8-style sweep on stack_trace queries once expansion (Phase 3) lands |
+| [Q-08-5](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | `ambiguous_max` 5 | 5 | Eval: truncation losses on ambiguous mentions |
+| [Q-08-6](design/08-path-matching.md#10-deviations-from-the-spec-and-open-questions) | Should a directory hit seed the walk (start the walk at that dir) rather than only entering the pool? | Pool + flatten if small (09 §4.4) | Eval on prompts that name directories |
+| [Q-09-1](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | Add `previous_task` to final-pass state on `extends` ("also email the customer when *it* ships")? | No | Sequence eval: delta recall with/without |
+| [Q-09-2](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | `walk_guard` 0.5 and `beam_min` 1 | As listed | Dev: guard rate vs recall on `natural` queries |
+| [Q-09-3](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | Does Jev latency grow with questions per request? If so, split the final pass at ~20 | Split only by token budget | 07 conformance latency curve |
+| [Q-09-4](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | `max_frontier` 12 | 12 | Layered repo recall vs requests per route |
+| [Q-09-6](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | Should a directory path hit seed the walk at that directory? | No (pool + flatten) | Links Q-08-6 |
+| [Q-09-8](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | On `deadline`, emit capability lines or nothing? | Capability lines (spec) | Agent behavior study |
+| [Q-09-9](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | Collapse on direct vs recursive file count | Direct | Eval precision on dir-collapsed notes |
+| [Q-10-1](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | Should the delta note announce leased pointers that were deleted/renamed (a `gone:` line)? | No in v1; the walk re-finds renamed files as additions | Sequence eval: count of turns where the agent opens a deleted pointer |
+| [Q-10-2](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | Under `same`, should a newly `use`-scored capability produce a one-line capability delta? | No (log `caps_drift` only) | Capability accuracy on sequence turns; frequency of `caps_drift` in logs |
+| [Q-10-5](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | On `extends`, should the stored `task_request` be updated (e.g. appended) so continuity compares against the widened task? | No; keep the originating request (spec §11.4) plus `last_request` | Continuity accuracy on 3+ turn sequences (spec §25 Q6) |
+| [Q-10-6](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | Should changed-but-present leased items be re-judged in the final pass on a stale `extends` (at the cost of pool slots)? | No: they stay leased and act as anchors | Sequence eval with a commit between turns: pointer precision on the next turn |
+| [Q-10-7](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | Spec §12.4 says "low-confidence continuity → extends" in general; §11.4 and 09 apply it only to `same`. Should a low-confidence `new` also become `extends`? | No (follow §11.4 / 09) | Sequence eval: accuracy of `new` answers by confidence bucket |
+| [Q-11-1](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | Should items within a line be ordered by score (conveys priority) or alphabetically (easier to scan)? | Score order | Agent-behavior eval: first-opened file matches first pointer? |
+| [Q-11-2](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | Should the delta note re-issue the full list instead of additions (spec §25 Q4)? | Additions only | Sequence eval: recall of files opened on `extends` turns |
+| [Q-11-3](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | Should the note show directory pointers with a file count (`src/fulfillment/ (6 files)`)? | No | Precision/agent-behavior eval |
+| [Q-11-4](design/11-note.md#10-deviations-from-the-spec-and-open-questions) | Header wording ("nothing is preloaded") — does it reduce agents over-trusting pointers? | Keep spec wording | Wording experiment in `eval/wordings.yaml` key `note` |
+| [Q-12-4](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | Hook fast path: accept a slightly stale ack list (default) instead of full config validation? | Yes, unless `ack_words` appears in the raw TOML | Import-time measurements |
+| [Q-12-6](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | Should the snippet also tell agents to call `route_context` again on task change? | Yes, via the tool description only; the snippet stays spec wording | Pull-path sequence eval in a non-hook harness |
+| [Q-13-4](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | Should `router.max_pointers` above 12 be allowed at all? | Up to 30 with a warning | Precision eval |
+| [Q-14-1](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | `*secret*` / `*credentials*` would exclude legitimate code (`secretsManager.ts`, `secret_rotation.py`); 01 D-01-2 narrows them to non-code extensions. Is that narrowing safe? | Narrow (01 D-01-2); review the files it keeps on the benchmark repos | Manual review of kept `*secret*` code files on benchmark repos; eval labels pointing at excluded files |
+| [Q-14-4](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | Path-name lures (ADV-4) can't be filtered without harming recall | Accept; report G1 result | Adversarial eval |
+| [Q-14-6](design/14-security-privacy.md#10-deviations-from-the-spec-and-open-questions) | R3 acronym allowlist source | Words ≥ 5 all-caps letters that also occur as identifiers in ≥ 2 indexed file paths or table names | Adversarial + dev eval |
+| [Q-16-1](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | Is 8 files the right directory-credit limit? | Tie to the collapse limit (`eval.dir_credit_max_files = 8`) | If 09 changes the collapse rule, follow it |
+| [Q-16-2](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | Live run-to-run noise vs. the 0.03 tolerance | Keep 0.03 but require the paired CI to say `worse` in nightly; measure noise with two live runs in Phase 0 | Phase 0 noise measurement |
+| [Q-16-7](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | Minimum inter-labeler agreement for a dataset to be usable | Report only; flag if mean `must_f1 < 0.7` | Phase 0 experience |
+
+## 4. Other open questions
+
+Verification against third-party tools, user or maintainer feedback, telemetry after release, and questions already settled by the consistency pass (status **resolved**).
+
+| Id | Question | Proposed default | Decided by | Status |
+|---|---|---|---|---|
+| [Q-01-2](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | Claude Code plugin layout (`installed_plugins.json`, `enabledPlugins`) is not a stable public contract | Best-effort reader behind `user_level`; failures are warnings | Verify against current Claude Code release in Phase 4 | open |
+| [Q-01-3](design/01-discovery.md#10-deviations-from-the-spec-and-open-questions) | Cursor `.cursor/commands/` and `.cursor/rules/` as capability surfaces? | Out of v1 (spec lists only Cursor MCP) | User demand | open |
+| [Q-02-4](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | TOML (`+++`) frontmatter for Hugo docs | Not supported | User demand | open |
+| [Q-02-5](design/02-cards.md#10-deviations-from-the-spec-and-open-questions) | Plugin-provided capability id namespacing (`skill:{plugin}:{name}`) | As §4.8.2 | Match Claude Code's displayed names once verified | open |
+| [Q-03-4](design/03-schema-extraction.md#10-deviations-from-the-spec-and-open-questions) | Monorepo with several independent databases: one `db:*` or one root per source? | One root; conflicts by precedence | Monorepo users (spec §24) | open |
+| [Q-04-7](design/04-graph-edges.md#10-deviations-from-the-spec-and-open-questions) | git rename-detection heuristics can differ across git versions, so co-change can differ across machines | Record `git_version` in meta; `--check` warns (and doesn't fail) on a version mismatch | Real-world `--check` failures | open |
+| [Q-05-2](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | Ship a git merge driver for committed catalogs? | No; `surf index --baseline` after conflicts | User feedback from committed-mode teams | open |
+| [Q-05-3](design/05-catalog-store.md#10-deviations-from-the-spec-and-open-questions) | Windows `os.replace` over an open SQLite file: is `nolock=1` plus retries enough? | Yes, with pending-marker fallback | Windows CI job | open |
+| [Q-06-2](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | Should the first route in a fresh clone wait for a small repo's cold build (e.g. ≤ 2 s estimated) instead of returning `index-missing`? | No: SessionStart already waits 3 s | Fresh-clone UX feedback | open |
+| [Q-06-3](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | Should `--check` in committed mode fail on any lag (strict) or only on a lag larger than N commits? | Strict (0 indexed-path changes), with `--allow-lag` | Team feedback on PR friction | open |
+| [Q-06-4](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | Live MCP listings in a committed baseline can't be verified in CI | Trusted as committed inputs | Security review (14): a committed listing is an injection vector like any committed text | open |
+| [Q-06-5](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | pre-commit `.legacy` chaining and lefthook `{0}` argument passing: verify against current releases | As specified | Phase 4 integration test against pinned versions | open |
+| [Q-06-6](design/06-refresh.md#10-deviations-from-the-spec-and-open-questions) | Stash, `git restore`, editor saves: no hook fires; is SessionStart + the 60 s CLI check enough, or do we need a cheap per-route freshness check? | Enough in v1 (leases re-validate by card hash) | Stale-pointer rate in decision logs | open |
+| [Q-07-4](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | Escalating breaker cooldown (60 → 120 → 300 s) on repeated opens | Fixed 60 s | Production decision logs: flapping rate | open |
+| [Q-07-5](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | Production answer cache (e.g. repeated walk level 1 for the same request in a session) | None in v1 | Latency data on `extends` routes | open |
+| [Q-07-7](design/07-judge.md#10-deviations-from-the-spec-and-open-questions) | Cross-process concurrency cap (several sessions × 16) | None | Rate-limit errors (429 share) in decision logs | open |
+| [Q-09-5](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | Skip speculation when a lease exists and the prompt is short (likely `same`) | Always speculate | Wasted-token share in decision logs | open |
+| [Q-09-7](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | Migration line for selected tables built by the note from `defined_in` edges | Yes (11) | 11 review | open |
+| [Q-09-10](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | 15 §3.3 wants the top 20 **rejected** expansion neighbours in the trace; 04's `expand()` returns admitted candidates only | 04 adds `expand(..., collect_rejected: int = 0)` returning `(admitted, rejected)` | consistency pass | resolved 2026-09-23: adopted in 04 §2/§4.5 |
+| [Q-09-11](design/09-router.md#10-deviations-from-the-spec-and-open-questions) | Expansion keys: 16 §3.5 proposes `router.expand_kinds`, 04 §5 defines `router.expand.enabled_kinds` | Use 04's `router.expand.enabled_kinds`; 16's ablation overlays should be renamed | consistency pass | resolved 2026-09-23: 13 D-13-8; 16 renamed |
+| [Q-10-3](design/10-lease.md#10-deviations-from-the-spec-and-open-questions) | Is 45 min idle right for agent sessions with long tool runs? | 45 | Decision logs: distribution of gaps between prompts that Jev judged `same` | open |
+| [Q-12-1](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | Does Claude Code keep the same `session_id` after `/clear`? | Expire the payload's id on `source="clear"`; stale ids idle out | Verify against current Claude Code; test fixture | open |
+| [Q-12-2](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | Is the current prompt already in the transcript when `UserPromptSubmit` runs? | Handle both (skip the first exact match once) | Verify; fixture for each | open |
+| [Q-12-3](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | Should `surf init` register the MCP server for Claude Code when hooks are installed? | Yes (for `surface_info`); the tool description discourages duplicate `route_context` calls | Count duplicate routes in decision logs (same session, < 5 s apart) | open |
+| [Q-12-5](design/12-delivery.md#10-deviations-from-the-spec-and-open-questions) | Shared-mode hook command on Windows without a POSIX shell | POSIX wrapper; Windows users use local mode | Windows user reports | open |
+| [Q-13-1](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | Unknown keys: errors (catch typos) or warnings (forward compatibility)? | Warnings; `--strict` makes them errors | User feedback on silent typos | open |
+| [Q-13-2](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | Should the committed `project.descriptor` be fingerprinted (it's only used at query time)? | No | — | open |
+| [Q-13-3](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | `judge.price_per_mtok_input` (07) and `eval.price_per_mtok` (16) overlap. Should eval derive jev's price from `judge.*`? | Yes: `eval.price_per_mtok` only for non-active backends | 07/16 owners | open |
+| [Q-13-5](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | Should a user be able to exclude a huge local-only dir without touching the committed config? | Yes, through `.git/info/exclude` (discovery honors git's exclude sources), not surf config | User requests | open |
+| [Q-13-6](design/13-config.md#10-deviations-from-the-spec-and-open-questions) | Hook kill switch naming: 06 uses `SURF_SKIP_HOOKS`, 14's hook sketch used `SURF_HOOK_DISABLE` | `SURF_SKIP_HOOKS` (06 owns the hook block) | consistency pass | resolved 2026-09-23: 14 §4.6 now reproduces 06's block |
+| [Q-15-1](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | Should `selected` ids be hashed too (paths can reveal what a developer works on)? | No; logs are local, `0600`, gitignored | User feedback / privacy review | open |
+| [Q-15-2](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | Windows rotation can fail when another process holds the file open | Retry on next append; if the file reaches 2 × `max_bytes`, open with a new name `decisions.<ulid>.jsonl` and let the reader glob | Windows CI results | open |
+| [Q-15-3](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | Log retention by age (e.g. 30 days) in addition to size? | No in v1 | User feedback | open |
+| [Q-15-4](design/15-observability.md#10-deviations-from-the-spec-and-open-questions) | `RouteTrace` field list (§3.3) must be adopted by 09-router | As listed | consistency pass | resolved 2026-09-23: 09 §3.4 implements it (superset) |
+| [Q-16-3](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | Question-level fixture fallback and replayed latency (`simulate_latency`) belong to 07's `judge/fixture.py` | Adopt both in 07 | consistency pass | resolved 2026-09-23: 07 D-07-3 |
+| [Q-16-8](design/16-evaluation.md#10-deviations-from-the-spec-and-open-questions) | New keys `router.mode`, `router.expand.enabled_kinds`, `index.cards.coupled_dirs`, and pure `route/select.py` over a trace | Adopt in 13 and 09 | consistency pass | resolved 2026-09-23: 13 §3, 09 §2 (`route/select.py`) |

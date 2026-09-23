@@ -2,7 +2,7 @@
 
 **Status:** draft for review
 **Spec sections:** §11.3 (also §8.5 anchor strength, §17.1 `stack_trace` category, §21 "incidental path hits")
-**Depends on:** 00-foundations (ids, `norm_path`, F2/F3), 05-catalog-store (`CatalogReader.id_for_path`, `ids_for_suffix`, `ids_for_basename` over `index.sqlite`), 09-router (consumer)
+**Depends on:** 00-foundations (ids, `norm_path`, F2/F3), 05-catalog-store (`CatalogReader.id_for_path`, `ids_for_path`, `ids_for_suffix`, `ids_for_basename` over `index.sqlite`), 09-router (consumer)
 **Code:** `surf/route/pathmatch.py`, `surf/route/pathindex.py` (new: `PathIndex` protocol + catalog-backed and in-memory trie implementations)
 
 ---
@@ -139,7 +139,7 @@ Two queries, both walking the query's reversed segments from the root:
 | `suffixes_of(q)` (files) | `id_for_path("/".join(q[-k:]))` for `k = len(q) … 1`, longest first (≤ ~12 point lookups) |
 | `suffixes_of(q)` (dirs) | `id_for_path("/".join(q[-k:]) + "/")` for the same `k` (dir hits only via row 1 of §4.4) |
 | `with_suffix(q)` | `ids_for_suffix("/".join(q))` (files only; every segment-aligned file suffix is a row in 05's `suffixes` table) |
-| `fold=True` | the same calls with `casefold=True` |
+| `fold=True` | the same calls with `casefold=True`; exact-path lookups use `ids_for_path(…, casefold=True)` (several ids = ambiguous) |
 | known extensionless names | `ids_for_basename(name)` for each name in the fixed list of §4.1 row 17 |
 
 Directories are therefore never TAIL/BASENAME matches, only full-suffix matches (`src/fulfillment/` or `/app/src/fulfillment`), which is the conservative choice for directory mentions.

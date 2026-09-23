@@ -113,7 +113,7 @@ Rules (01-discovery enforces, this doc defines):
 1. A secret-like file is **never opened** (no line count, no null-byte check, no schema-ref scan).
 2. It gets **no id**, so it can't appear in a directory card's `child_files`, a co-change partner list, a path hit, `files_total`, or an eval label (`surf eval validate` rejects labels pointing at one).
 3. Co-change (04) drops these paths from each commit's file list **before** the max-files-per-commit filter and pairing.
-4. Directories are never excluded by this list (only files). `src/secrets/` is walked; `src/secrets/manager.ts` is excluded by `*secret*` (a known false positive, see Q-14-1).
+4. Directories are never excluded by this list (only files). `*credentials*` and `*secret*` apply only to files whose extension isn't a source-code extension (01 D-01-2), so `src/secrets/` is walked, `src/secrets/manager.ts` is kept and `config/secrets.yaml` is excluded (see Q-14-1).
 5. `.env.example` / `.env.sample` are excluded too; templates often carry real values.
 6. User override: `index.include` (13-config) may re-include a path explicitly; `surf doctor` prints each such override.
 
@@ -219,34 +219,33 @@ Applies to `extract_caps.py` (02) when a server is in `capabilities.live_mcp`.
 | stderr | Read into a 4 KiB ring buffer, redacted, shown only in the error message on failure; never logged to file. |
 | HTTP servers | `https://` required, or `http://` only for loopback. No redirects across hosts. Auth headers only from config env references. 401/OAuth-required → mark `listing: "unavailable"` and fall back to the one-line purpose prompt (spec §7.6 step 4). |
 | Storage | Committed catalog stores server name, transport, `command` **basename** only, URL with userinfo and query stripped (00 §4 rule 5), tool names, sanitized purpose. Never env values or headers. |
-| User-level configs | Capabilities discovered from user-level configs (`~/.codex/…`, user Claude settings; opt-in `capabilities.user_configs`) are written to `.surf/cache/overlay.jsonl` (the local-only card overlay, 00 §4.1), **not** the committed catalog, so one developer's private servers don't land in the repo (D-14-4; 02/05 must honor this). |
+| User-level configs | Capabilities discovered from user-level configs (`~/.codex/…`, user Claude settings; opt-in `capabilities.user_level`) are written to `.surf/cache/overlay.jsonl` (the local-only card overlay, 00 §4.1), **not** the committed catalog, so one developer's private servers don't land in the repo (D-14-4; 02/05 must honor this). |
 
 ### 4.6 Git hook script
 
-`adapters/git_hooks.py` (06/12) writes this block. For a hook file that doesn't exist, it creates it with a shebang. For an existing hook, the block is inserted **immediately after the shebang line**, so it runs even if the existing hook calls `exit` or `exec` later. With a hook manager (husky, lefthook, pre-commit), the same one-line command is added as an entry instead.
+`adapters/git_hooks.py` writes this block; 06 §4.8 owns its exact text (reproduced here). For a hook file that doesn't exist, it creates it with a shebang. For an existing hook, the block is inserted **immediately after the shebang line**, so it runs even if the existing hook calls `exit` or `exec` later. With a hook manager (husky, lefthook, pre-commit), the same one-line command is added as an entry instead.
 
 ```sh
 #!/bin/sh
-# >>> surf (managed by `surf init`; remove with `surf uninstall`) >>>
-if [ -z "$SURF_HOOK_DISABLE" ] && command -v surf >/dev/null 2>&1; then
-  ( SURF_HOOK=1 surf refresh --changed --quiet --from-hook post-commit \
-      </dev/null >/dev/null 2>&1 & ) || true
+# >>> surf >>> managed by `surf init`; remove with `surf uninstall`
+if [ -z "$SURF_SKIP_HOOKS" ] && [ -f .surf/cache/meta.json ] && command -v surf >/dev/null 2>&1; then
+  ( surf refresh --changed --background --quiet --reason "<hook>" "$@" </dev/null >/dev/null 2>&1 & ) || true
 fi
 # <<< surf <<<
 ```
 
-Installed for `post-commit`, `post-merge`, `post-checkout`, `post-rewrite`; only the `--from-hook` value differs.
+Installed for `post-commit`, `post-merge`, `post-checkout`, `post-rewrite`; only the `--reason` value differs.
 
 | Property | How |
 |---|---|
 | Never blocks git | Backgrounded subshell; stdio detached; `\|\| true`; no `set -e` inside the block |
 | Never fails git | Post-hooks can't abort git anyway; block can't return non-zero |
-| No untrusted input | Hook arguments (`$1 $2 $3`, refs, rewritten SHAs) are ignored; `surf refresh --changed` recomputes from git itself |
-| No network | `refresh` never makes network calls; live MCP listing is skipped under `SURF_HOOK=1` |
+| No untrusted input | Hook arguments are passed through only for 06's `post-checkout` `$3` rule (a flag, validated); refs and rewritten SHAs are never trusted, and `surf refresh --changed` recomputes from git itself |
+| No network | `refresh` never makes network calls; live MCP listing runs only on explicit `surf init/index --live-mcp` (02 §4.8.5), never from a hook |
 | Visible | Plain text in `.git/hooks/` or `core.hooksPath` (honored), fenced by markers |
 | Reversible | `surf uninstall` removes exactly the marked block; deletes the file only if nothing but the shebang remains |
 | Concurrency | `refresh` takes the index lockfile (06); overlapping hooks exit immediately if the lock is held |
-| Kill switch | `SURF_HOOK_DISABLE=1` in the environment |
+| Kill switch | `SURF_SKIP_HOOKS=1` in the environment (06 §4.8, 13 §4.3) |
 
 Trust note: the hook resolves `surf` via `PATH`, the same trust as any developer tool on `PATH`. Pinning an absolute path would break when the user reinstalls with `uv`/`pipx`.
 
@@ -340,7 +339,7 @@ Names follow 13-config (`section.key`).
 | `index.exclude` | list[glob] | `[]` | User excludes (spec §16) |
 | `index.include` | list[glob] | `[]` | Explicit re-includes; can override secret-like globs (doctor lists them) |
 | `capabilities.live_mcp` | list[str] | `[]` | Spec §16 |
-| `capabilities.user_configs` | bool | `false` | Read user-level harness configs (spec §7.6 "if the user opts in") |
+| `capabilities.user_level` | bool | `false` | Read user-level harness configs (spec §7.6 "if the user opts in") |
 | `capabilities.live_timeout_ms` | int | `10000` | Per server |
 
 ---
@@ -431,7 +430,7 @@ Names follow 13-config (`section.key`).
 
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
-| Q-14-1 | `*secret*` excludes legitimate code (`secretsManager.ts`, `secret_rotation.py`). Narrow it to non-code extensions? | Keep spec behavior; measure how many code files it excludes across benchmark repos; narrow if > 0.5 % of files or any labeled must_include is hit | Eval dataset validation (labels pointing at excluded files) |
+| Q-14-1 | `*secret*` / `*credentials*` would exclude legitimate code (`secretsManager.ts`, `secret_rotation.py`); 01 D-01-2 narrows them to non-code extensions. Is that narrowing safe? | Narrow (01 D-01-2); review the files it keeps on the benchmark repos | Manual review of kept `*secret*` code files on benchmark repos; eval labels pointing at excluded files |
 | Q-14-2 | Redacting 40-hex git SHAs loses "revert a1b2…" context | Redact (keys are often hex) | User feedback; eval shows no loss (SHAs don't help routing) |
 | Q-14-3 | Should emails be redacted by default? | Yes (`privacy.redact_emails = true`) | Privacy review |
 | Q-14-4 | Path-name lures (ADV-4) can't be filtered without harming recall | Accept; report G1 result | Adversarial eval |

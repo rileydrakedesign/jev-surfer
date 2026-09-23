@@ -215,7 +215,7 @@ class RouteTrace(BaseModel):
     judge: JudgeUsageSummary                # 07 §3.3
     judge_requests: list[dict] | None       # only with --show-requests / eval record mode
     thresholds_profile: str; calibrated: bool
-    latency_ms: LatencyMs                   # {total, call1, walk, expand, final, overhead}
+    latency_ms: LatencyMs                   # {total, call1, walk, expand, final, overhead, process} (15 §3.1)
     explain: ExplainExtras | None           # explain only: raw path mentions (08 trace), card texts
 ```
 
@@ -382,9 +382,9 @@ async def run(first, needs_context, *, excluded, has_path_hits):
 
 ```python
 anchors = {h.id: h.strength for h in path_hits} | {c.id: c.score for c in walk_cands.values()}
-hits = graph.expand.expand(anchors, ctx.catalog, cfg.expand,                 # 04 §4.5; ExpandConfig from
-                           exclude=excluded_ids)                           # router.expand.* + thresholds.expand
-rejected = top 20 below-threshold neighbours (04 exposes them for the trace; see §10 Q-09-10)
+hits, rejected = graph.expand.expand(anchors, ctx.catalog, cfg.expand,       # 04 §4.5; ExpandConfig from
+                           exclude=excluded_ids,                           # router.expand.* + thresholds.expand
+                           collect_rejected=20)                            # top 20 below-threshold, for the trace
 ```
 
 - 04 owns everything about scoring: depth 1, `kind_factor`, traversal directions, `router.expand.max_per_anchor` (8, per kind), `max_total` (40), `enabled_kinds` (ablations A1–A4), `code:`→`mig:` canonicalisation. Edges are read through `CatalogReader.edges_from` (symmetric kinds are stored once; 05 returns both directions). Directory anchors contribute only through `contains` to README/index files.
@@ -628,5 +628,5 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 | Q-09-7 | Migration line for selected tables built by the note from `defined_in` edges | Yes (11) | 11 review |
 | Q-09-8 | On `deadline`, emit capability lines or nothing? | Capability lines (spec) | Agent behavior study |
 | Q-09-9 | Collapse on direct vs recursive file count | Direct | Eval precision on dir-collapsed notes |
-| Q-09-10 | 15 §3.3 wants the top 20 **rejected** expansion neighbours in the trace; 04's `expand()` returns admitted candidates only | 04 adds `expand(..., collect_rejected: int = 0)` returning `(admitted, rejected)` | 04 review |
-| Q-09-11 | Expansion keys: 16 §3.5 proposes `router.expand_kinds`, 04 §5 defines `router.expand.enabled_kinds` | Use 04's `router.expand.enabled_kinds`; 16's ablation overlays should be renamed | 13 review |
+| Q-09-10 | 15 §3.3 wants the top 20 **rejected** expansion neighbours in the trace; 04's `expand()` returns admitted candidates only | 04 adds `expand(..., collect_rejected: int = 0)` returning `(admitted, rejected)` | Resolved: adopted in 04 §2/§4.5 |
+| Q-09-11 | Expansion keys: 16 §3.5 proposes `router.expand_kinds`, 04 §5 defines `router.expand.enabled_kinds` | Use 04's `router.expand.enabled_kinds`; 16's ablation overlays should be renamed | Resolved: 13 D-13-8; 16 renamed |

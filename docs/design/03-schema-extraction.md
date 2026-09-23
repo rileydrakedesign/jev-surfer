@@ -292,7 +292,7 @@ Tables ordered by table churn (02 §4.7: count of migrations touching it) desc, 
 | Kind | From → to | Weight | Evidence | Rule |
 |---|---|---|---|---|
 | `fk` | `db:<table>` → `db:<ref>` | 0.7 (spec §8.3.5) | `{"columns": [...]}` | one per (from, to) pair, columns merged; self-references dropped; target may be an external stub |
-| `defined_in` | `db:<table>` → `mig:<path>` | 1.0 for `created_in` and the last `changed_in`; 0.5 for others | `{"op": "create"\|"alter"\|…}` | at most 10 per table: creator + 9 most recent; snapshot sources target `code:<snapshot path>` instead (no `mig:` card for snapshots) |
+| `defined_in` | `db:<table>` → `mig:<path>` | 1.0 | `{"role": "create"\|"alter"}` | per 04 §4.3 (D-04-5): creator + 3 most recent alters (`index.schema.max_defined_in` = 4); 03 emits all candidates in replay order and 04 applies the cap; snapshot sources target `code:<snapshot path>` instead (no `mig:` card for snapshots) |
 | `alias` | `code:<path>` → `mig:<path>` | 1.0 | `{}` | one per migration file that is also in the content tree (F3) |
 
 Views additionally get `defined_in` to the view-defining migration. View → base-table dependencies are shown on the card only (Q-03-3). 04 owns validation (dropping intents whose endpoints don't exist) and writing.
@@ -396,7 +396,7 @@ Cold parses are parallelized per file with a process pool (`min(4, cpu)`) when t
 | D-03-1 | "Migrations are replayed in order" | When a snapshot (Prisma, `schema.rb`, `structure.sql`) exists, it defines the table set; migrations only supply provenance | Snapshots are the tool's own statement of current state; replaying Rails/Prisma migrations through regex would be less accurate |
 | D-03-2 | `CREATE VIEW` is parsed; no view surface type | Views are `db_table` cards with `fields.kind = "view" \| "materialized_view"` | Agents query views like tables; no new surface type or prefix needed |
 | D-03-3 | Silent on unresolved FK targets | External stub cards (`status="external"`) for referenced but undefined tables such as `auth.users` | Supabase apps FK to `auth.users` constantly; tasks about "users" should reach it |
-| D-03-4 | `defined_in` weight 1.0 | 1.0 for creator and latest change, 0.5 for others; ≤ 10 per table | Heavily altered tables would otherwise flood expansion with old migrations |
+| D-03-4 | `defined_in` weight 1.0, unbounded | Weight 1.0; capped at creator + 3 most recent alters per table (same rule as 04 D-04-5, `index.schema.max_defined_in`; this doc previously proposed 0.5 weights and ≤ 10) | Heavily altered tables would otherwise flood expansion with old migrations |
 | D-03-5 | Migration order unspecified | File-name version keys (Flyway, timestamps, numeric), Drizzle journal, Alembic revision DAG; never mtime or git time | Deterministic across clones; matches each tool's own ordering |
 | D-03-6 | `mig:` parent per F3 is `db:*` "for bookkeeping" | `Card.parent = None` for `mig:` (as 00 §3's `Card` comment says) and no `contains` edge | A `contains` edge would make migrations walk children of `db:*` and crowd the table chunks |
 | D-03-7 | Django: "fall back to model file names" | Detection + report only; model files are ordinary code cards | Nothing to extract without a Python-AST pass |

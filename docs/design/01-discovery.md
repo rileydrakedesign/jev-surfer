@@ -189,8 +189,8 @@ Evaluated in this order; first hit wins and is recorded as the reason:
 
 | # | Rule | Patterns / behavior | Overridable by `index.include`? |
 |---|---|---|---|
-| 1 | Secret-like (spec §7.1) | always: `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`; plus basename `*credentials*` / `*secret*` **only when the extension isn't a source-code extension** (D-01-2) | **No.** Never read, never carded |
-| 2 | Always | `.git/`, `.surf/` | No |
+| 1 | Secret-like (spec §7.1) | 14 §3.2 `SECRET_LIKE_GLOBS` (basename, case-insensitive: `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, …), except that `*credentials*` / `*secret*` apply **only when the extension isn't a source-code extension** (D-01-2) | Only by an explicit `index.include` entry for that path, which `doctor` lists (14 §3.2 rule 6, D-14-8). Otherwise never read, never carded |
+| 2 | Always | `.git/`, `.surf/`; any path for which `redact.path_is_safe` is false (control characters, newlines or bidi controls in any segment; 14 §4.3, D-01-7), logged | No |
 | 3 | Capability definitions (D-01-3) | `.claude/skills/`, `.claude/agents/`, `.claude/commands/`, `.opencode/agent/`, `.opencode/agents/`, `.opencode/command/`, `.opencode/commands/`, `.codex/skills/`, `.codex/prompts/` | No (they become capability cards) |
 | 4 | Default dirs (any depth) | spec: `node_modules/ vendor/ .venv/ venv/ target/ dist/ build/ .next/ out/ coverage/ __pycache__/`; added: `__snapshots__/ .tox/ .mypy_cache/ .pytest_cache/ .ruff_cache/ .gradle/ .turbo/ .nuxt/ .svelte-kit/ .parcel-cache/ .terraform/ bower_components/ Pods/ .dart_tool/ .idea/` | Yes |
 | 5 | Default files | `*.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `go.sum`, `*.min.*`, `*.map`, `*.snap`, `*.pyc` | Yes |
@@ -279,7 +279,7 @@ Rules:
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `index.exclude` | list[str] | `[]` | gitignore-style (§3.4) |
-| `index.include` | list[str] | `[]` | new; overrides default and user excludes, not secret-like/always/cap-definition |
+| `index.include` | list[str] | `[]` | new; overrides default and user excludes and (explicitly, doctor-listed) secret-like; never always/cap-definition |
 | `index.default_excludes` | bool | `true` | new; disables rules 4–6 |
 | `index.include_untracked` | bool | `true` | new |
 | `index.max_file_bytes` | int | `1_000_000` | spec §16 |
@@ -301,6 +301,7 @@ Rules:
 | Submodule | Excluded (`SUBMODULE`), one warning listing the count |
 | Symlink (file or dir) | Excluded, counted; never followed (cycles, out-of-repo reads) |
 | Path with `:` or spaces or non-ASCII | Legal; NFC-normalized; `-z` output avoids quoting issues |
+| Path with a newline, control or bidi character | Excluded (rule 2, `path_is_safe`), counted and logged; never opened |
 | NFC collision | §4.2 |
 | Case-only duplicates (`Readme.md`, `README.md`) | Both kept; ids differ by case (00 §2.2) |
 | Tracked file deleted in working tree | Dropped (from `--deleted`) |
@@ -332,7 +333,7 @@ Git calls: `rev-parse` ×3, `ls-files` ×3, `check-attr` ×1 (stdin batch). No p
 
 **Unit**
 - `globs.py`: table-driven against `git check-ignore --no-index` output generated once and checked in (≈150 cases: anchoring, `**`, trailing `/`, negation, character classes).
-- Exclusion order: each rule, first-hit-wins reason, `index.include` overriding rules 4–7 only; secret-like never overridable.
+- Exclusion order: each rule, first-hit-wins reason, `index.include` overriding rules 1 and 4–7 only (rule 1 only by an explicit path, reported by `doctor`); rules 2–3 never overridable.
 - Classification: F4 table (`src/NOTES.md` → doc, `docs/conf.py` → code, `README` → doc, `adr/0001.txt` → doc).
 - `build_tree`: prefix threshold at 50 %/51 %, root excluded, empty dirs absent, untracked-only dirs.
 - Line counting: empty file, no trailing newline, CRLF (counts `\n`), oversize.
@@ -366,6 +367,7 @@ Git calls: `rev-parse` ×3, `ls-files` ×3, `check-attr` ×1 (stdin batch). No p
 | D-01-4 | Excludes list only | Added: linguist attributes, `Code generated … DO NOT EDIT` headers, more tool cache dirs | Generated code is a common distractor; `.gitattributes` is committed so it stays deterministic |
 | D-01-5 | `max_file_bytes` purpose unstated | Oversize files keep a path-only card | Stack traces still point at them; content fields would be noise |
 | D-01-6 | `~/.codex/config.*` | `config.toml` (+ `$CODEX_HOME`), plus `.codex/config.toml` and `~/.codex/prompts/` | Current Codex layout |
+| D-01-7 | All non-excluded files are indexed (§7.1) | Paths containing control characters, newlines or bidi controls are always excluded at discovery (14 `path_is_safe`) | A crafted file name could otherwise inject lines into the note or judge prompts (14 T5) |
 
 ### Open questions
 

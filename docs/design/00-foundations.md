@@ -204,7 +204,7 @@ The spec's principle 6 is enforced structurally:
 | Distribution name | `jev-surfer` on PyPI (the name `surf` is very likely taken); import package `surf`; console script `surf`. (Q-F1) |
 | Python | 3.11+. `from __future__ import annotations` everywhere. |
 | Tooling | `uv` for env and lockfile; `ruff` (lint + format); `pyright` in strict mode for `surf/`; `pytest`. |
-| Layout | `src/surf/…` (src layout) with the module tree from spec §22.2, plus `surf/model.py`, `surf/ids.py`, `surf/deadline.py`, `surf/proc.py`, and modules added by the design docs: `eval/bootstrap.py`, `eval/flat.py`, `eval/label.py`, `log/explain.py`, `log/stats.py` (16, 15). surf's own benchmark (pinned external repos, synthetic repos, datasets, fixtures, baselines) lives in top-level `bench/` (16 D-16-8). `redact.py` is a Phase 0 deliverable because the bootstrap card builder uses its sanitizer. |
+| Layout | `src/surf/…` (src layout) with the module tree from spec §22.2, plus `surf/model.py`, `surf/ids.py`, `surf/deadline.py`, `surf/proc.py`, and modules added by the design docs: `surf/runtime.py`, `surf/control.py`, `adapters/_cc_transcript.py`, `adapters/_jsonfile.py`, `install/manifest.py` (12); `surf/config_write.py` (13); `lease/logic.py`, `surf/filelock.py` (10); `judge/jev_wire.py`, `judge/breaker.py` (07); `route/pathindex.py` (08); `route/state.py`, `route/trace.py`, `route/wordings.py` (09); `route/note_text.py` (11); `index/globs.py`, `index/frontmatter.py` (01, 02; below); `eval/bootstrap.py`, `eval/flat.py`, `eval/label.py`, `log/explain.py`, `log/stats.py` (16, 15). surf's own benchmark (pinned external repos, synthetic repos, datasets, fixtures, baselines) lives in top-level `bench/` (16 D-16-8). `redact.py` is a Phase 0 deliverable because the bootstrap card builder uses its sanitizer. |
 | Dependencies | Only those in spec §22.1. Anything new needs a line in the relevant design doc saying why. |
 | Pure core | `index/`, `graph/`, `route/`, `lease/` take their inputs as arguments (catalog, config, judge, clock). No module reads config or env on import. This makes every piece unit-testable with the fixture judge. |
 | Clock | Injected `Clock` protocol (`wall()`, `monotonic()`; see §4.2); tests use a fake clock. |
@@ -233,12 +233,12 @@ The spec's principle 6 is enforced structurally:
 | `05-catalog-store.md` | JSONL + SQLite, meta, commit policy | `catalog/*` |
 | `06-refresh.md` | incremental rebuild, triggers, `--check` | `index/build.py`, `adapters/git_hooks.py` |
 | `07-judge.md` | judge protocol, backends, resilience | `judge/*` |
-| `08-path-matching.md` | path extraction and normalization | `route/pathmatch.py` |
+| `08-path-matching.md` | path extraction and normalization | `route/pathmatch.py`, `route/pathindex.py` |
 | `09-router.md` | pipeline, skip, call 1, walk, expansion, final pass, selection | `route/*` |
-| `10-lease.md` | task lease | `lease/manager.py` |
-| `11-note.md` | note rendering | `route/note.py` |
-| `12-delivery.md` | CLI, MCP server, instruction snippet, Claude Code adapter, init/uninstall | `cli.py`, `adapters/*` |
-| `13-config.md` | `config.toml` schema and validation | `config.py` |
+| `10-lease.md` | task lease | `lease/manager.py`, `lease/logic.py`, `filelock.py` |
+| `11-note.md` | note rendering | `route/note.py`, `route/note_text.py` |
+| `12-delivery.md` | CLI, MCP server, instruction snippet, Claude Code adapter, init/uninstall | `cli.py`, `runtime.py`, `control.py`, `adapters/*`, `install/manifest.py` |
+| `13-config.md` | `config.toml` schema and validation | `config.py`, `config_write.py` |
 | `14-security-privacy.md` | redaction, sanitization, injection defenses | `redact.py` |
-| `15-observability.md` | decision log, `--explain`, `surf stats` | `log/decisions.py` |
+| `15-observability.md` | decision log, `--explain`, `surf stats` | `log/decisions.py`, `log/explain.py`, `log/stats.py` |
 | `16-evaluation.md` | datasets, runner, metrics, attribution, ablations | `eval/*` |

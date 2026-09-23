@@ -230,7 +230,7 @@ The time box is a *wait* bound, not a work bound, so a partial index is never pr
 | `edges.jsonl` | same `(from,to,kind)` key set; `evidence` exact; `|weight Δ| ≤ 0.0001` | – |
 | `meta.json` | all fields | `built_at`, `build`, `surf_version`, `git_version` (warn if they differ) |
 
-Output: exit code (0 ok, 1 mismatch or stale, 2 cannot verify) plus up to 20 diff lines.
+Output: exit code (0 ok, 4 mismatch or stale, 9 cannot verify; the CLI exit-code table is 12 §4.12.2) plus up to 20 diff lines.
 
 **Default policy (`commit_catalog=false`)**
 
@@ -239,12 +239,12 @@ Output: exit code (0 ok, 1 mismatch or stale, 2 cannot verify) plus up to 20 dif
 
 **Committed baseline (`commit_catalog=true`)**
 
-1. Load the committed `.surf/meta.json`; verify file digests (mismatch → 1).
-2. `B = meta.index_head`. If `B` is missing locally or not an ancestor of `HEAD` → **2** ("baseline commit not in history; use `fetch-depth: 0`").
-3. Staleness: `git diff --name-only -z B HEAD` filtered to paths that would be indexed (01 excludes applied), schema sources, capability config files and `.surf/config.toml`. Any hit → **1** ("stale: N indexed files changed since B; run `surf index --baseline`"), unless `--allow-lag`.
+1. Load the committed `.surf/meta.json`; verify file digests (mismatch → 4).
+2. `B = meta.index_head`. If `B` is missing locally or not an ancestor of `HEAD` → **9** ("baseline commit not in history; use `fetch-depth: 0`").
+3. Staleness: `git diff --name-only -z B HEAD` filtered to paths that would be indexed (01 excludes applied), schema sources, capability config files and `.surf/config.toml`. Any hit → **4** ("stale: N indexed files changed since B; run `surf index --baseline`"), unless `--allow-lag`.
    - This is what makes the committed baseline workable. A baseline built at `B` and committed in `C`, where `C` touches only `.surf/`, is **fresh at `C`**. `index_head` never needs to equal the commit that contains it.
-4. Co-change needs the full window history behind `B`. If the repo is shallow → **2**, unless `--trust-cochange`. In that case, `co_change`/`dir_coupling` edges and each card's `churn` field are taken from the committed files as inputs, and everything else is rebuilt and compared.
-5. Build `build_full(BuildInputs(history_ref=B, content="worktree"))`. Step 3 guarantees the indexed content at `HEAD` equals `B`'s. The working tree must be clean for indexed paths (else **2**). With `--allow-lag`, build from a temporary `git worktree add --detach <tmp> B` instead, and remove it afterwards.
+4. Co-change needs the full window history behind `B`. If the repo is shallow → **9**, unless `--trust-cochange`. In that case, `co_change`/`dir_coupling` edges and each card's `churn` field are taken from the committed files as inputs, and everything else is rebuilt and compared.
+5. Build `build_full(BuildInputs(history_ref=B, content="worktree"))`. Step 3 guarantees the indexed content at `HEAD` equals `B`'s. The working tree must be clean for indexed paths (else **9**). With `--allow-lag`, build from a temporary `git worktree add --detach <tmp> B` instead, and remove it afterwards.
 6. Capability cards: baselines include only repo-level capability sources (never user-level configs). Live MCP listings are taken from the committed catalog as inputs (CI can't start servers). See Q-06-4.
 7. Compare with the common rules above.
 
@@ -253,7 +253,7 @@ CI recipe (documented, committed mode only):
 ```yaml
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }          # required: co-change reads up to 24 months / 5,000 commits
-- run: uvx jev-surfer index --check  # exit 2 is a setup problem, not a stale catalog
+- run: uvx jev-surfer index --check  # exit 9 is a setup problem, not a stale catalog
 ```
 
 `surf index --baseline` refuses to run on a working tree that is dirty for indexed paths. It builds with `history_ref=HEAD`, writes `.surf/{catalog.jsonl,edges.jsonl,meta.json}` (05 §4.5) and prints "commit these files". The bot recipe (option d) runs exactly this on `main` and commits the result.
@@ -335,7 +335,7 @@ Changing `index.*` config invalidates only the caches keyed on that section's fi
 | GUI git clients with a minimal PATH | Hook no-ops; SessionStart catches up; doctor explains |
 | `SessionStart` with a missing index on a huge repo | Background full build; session proceeds with `index-missing` routes until it's done |
 | `--check` on Windows with CRLF checkout | `content_id` from blob ids for clean files, so line endings don't matter |
-| User edits committed baseline files by hand | `--check` → 1 (digest or content mismatch) |
+| User edits committed baseline files by hand | `--check` → 4 (digest or content mismatch) |
 | `commit_catalog` switched true → false | `surf init --reconfigure` removes the committed files via `git rm --cached` (printed, not auto-committed) |
 
 ---
@@ -365,8 +365,8 @@ Changing `index.*` config invalidates only the caches keyed on that section's fi
 - Hypothesis-driven: generate a fixture repo and a random sequence of operations (edit, add, delete, rename, commit, branch + checkout, rebase, amend, stash, config change, migration add, table rename). After each op run `refresh(mode="changed")`, then assert `catalog.jsonl` and `edges.jsonl` equal a fresh `build_full` byte for byte. 300 sequences in CI, 5,000 nightly.
 
 **`--check`**
-- Default mode: stale local catalog → 1; fresh → 0.
-- Committed mode: baseline at B, commit C touching only `.surf/` → 0 at C; a code change after → 1; shallow clone → 2; shallow + `--trust-cochange` → 0; baseline commit missing → 2; hand-edited catalog → 1; `--allow-lag` builds at B via worktree → 0.
+- Default mode: stale local catalog → 4; fresh → 0.
+- Committed mode: baseline at B, commit C touching only `.surf/` → 0 at C; a code change after → 4; shallow clone → 9; shallow + `--trust-cochange` → 0; baseline commit missing → 9; hand-edited catalog → 4; `--allow-lag` builds at B via worktree → 0.
 
 **Fail-open**
 - Kill the refresh at random points; the concurrent router loop never errors (05 concurrency harness).
@@ -383,7 +383,7 @@ Changing `index.*` config invalidates only the caches keyed on that section's fi
 2. The equivalence property test passes: incremental == full after every operation.
 3. No git operation by surf ever takes `.git/index.lock` (verified by running `git commit` in a loop concurrently with refreshes: zero lock failures).
 4. The hook installer passes all fixture setups; `uninstall` is byte-exact.
-5. `--check` behaves per §4.7 on all listed scenarios, including exit 2 for shallow clones.
+5. `--check` behaves per §4.7 on all listed scenarios, including exit 9 for shallow clones.
 6. In default mode, `git status` is clean after any commit/merge/checkout with hooks installed.
 
 ---
@@ -398,7 +398,7 @@ Changing `index.*` config invalidates only the caches keyed on that section's fi
 | D-06-2 | Changed set from `git diff <index_head>..HEAD` ∪ working-tree changes | Content-addressed caches keyed by blob ids; diffs only for co-change ranges | Robust to rebase/reset/stash/checkout; proves incremental == full |
 | D-06-3 | SessionStart: "refresh incrementally (time-boxed to 3 s), else warn" | Background refresh; the hook *waits* up to 3 s; the build is never cut short | A killed build would need partial-write handling; waiting gives the same UX |
 | D-06-4 | Steps 6–7: recompute ancestors and edge-derived fields for affected nodes | Re-render all cards every refresh (≈ 200 ms) | Removes a class of roll-up bugs; cost is small |
-| D-06-5 | `--check`: "fail if the committed catalog doesn't match a fresh build" | Freshness = no indexed-path change in `index_head..HEAD`, plus a rebuild at `index_head` (§4.7); exit code 2 for "cannot verify" | A catalog can't be built at the commit that contains it; shallow clones can't reproduce co-change |
+| D-06-5 | `--check`: "fail if the committed catalog doesn't match a fresh build" | Freshness = no indexed-path change in `index_head..HEAD`, plus a rebuild at `index_head` (§4.7); exit code 9 for "cannot verify" (4 for mismatch or stale; 12 §4.12.2) | A catalog can't be built at the commit that contains it; shallow clones can't reproduce co-change |
 | D-06-6 | "surf index … installs into husky/lefthook/pre-commit" (unspecified) | Per-manager rules in §4.8; committed manager configs are never edited except husky files (with consent) | Never replace or silently rewrite shared config |
 
 ### Open questions

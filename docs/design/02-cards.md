@@ -114,11 +114,12 @@ Card text contains edge-derived fields (`tables`, `changes_with`, `coupled_dirs`
 1. discover                              (01)
 2. extract intrinsic facts               code, docs, schema (03), capabilities
    → intrinsic hash per surface          (§4.9; no edge data)
-3. build edges                           (04) containment, co_change (+churn counts),
+3. build tree + edges                    (04) containment (graph/containment.py owns the Tree:
+                                         ids, parents, files_total), co_change (+churn counts),
                                          dir_coupling, schema_ref (needs table set from 03),
                                          fk / defined_in / alias (from 03 facts)
 4. render leaf cards                     code, doc, table, migration, capability
-5. render dir cards bottom-up            post-order over DirEntry (deepest path first),
+5. render dir cards bottom-up            post-order over 04's Tree (deepest path first),
                                          then schema root (03)
 6. hand Card list to catalog store       (05)
 ```
@@ -180,7 +181,7 @@ changes with: {changes_with}
 
 ### 4.4 Directory cards (spec §7.7)
 
-Built after all child cards, using `DirEntry` (01) and child facts.
+Built after all child cards, using 04's `Tree` node (ids, parent, children), `DirEntry` (01; prefix inputs, tracked counts) and child facts. `mig:` and capability cards are not tree nodes (`parent = None`; 04 §4.1, 05 `in_tree = 0`).
 
 | Field | Rule (all ties → name/id asc) |
 |---|---|
@@ -270,6 +271,8 @@ No git → `churn = None`, and ordering falls back to the next key. Thresholds a
 
 Names containing control characters or longer than 64 chars → source skipped with a warning.
 
+**Excluded capabilities.** Ids matching `capabilities.exclude` (ids or globs) are dropped before collision handling. surf's own MCP server is always dropped: any MCP entry named `surf` or whose command basename is `surf`/`surf-hook` (the entry `surf init` registers, 12 §4.5.3), so surf never routes to itself; `doctor` check `mcp.self_indexed` verifies it.
+
 #### 4.8.3 Collisions and precedence
 
 Several sources can define the same id (same MCP server in `.mcp.json` and `.cursor/mcp.json`; a skill read by both Claude and OpenCode). One card per id:
@@ -342,6 +345,8 @@ def card_hash(type_, inputs) -> str:
 | capability | `id, name, description, transport, target, purpose, listing (tools+instructions) or null, sources` |
 | db_table, schema_root, db_migration | 03 §4.7 |
 
+Free text enters `inputs` after sanitization (§4.11), so the sanitizer, including 14's injection filter (`privacy.injection_filter`, fingerprint section `cards` in 13 §4.5), is part of the hash: toggling it changes hashes and forces a full rebuild.
+
 Spec §7.8 includes "extracted tables" in the file hash; tables are edge-derived here and excluded (D-02-3). Change **detection** doesn't use `hash` alone: git diff, or the cache fingerprint (01 §3.3) for non-git/untracked files, decides what to re-extract; `hash` then decides whether the card and its ancestors changed.
 
 ### 4.10 Project descriptor (spec §16)
@@ -350,12 +355,12 @@ If `project.descriptor` is unset: `"{L1} + {L2} project"` from the top two code 
 
 ### 4.11 Sanitization
 
-`sanitize(s, cap)` applied to every free-text item (titles, headings, descriptions, tool descriptions, instructions, purposes):
+`sanitize(s, cap)` applied to every free-text item (titles, headings, descriptions, tool descriptions, instructions, purposes) is 14's `redact.sanitize_field` (14 §3.3 owns the exact steps and caps). Summary:
 
-1. NFC; drop C0/C1 controls except space, bidi overrides (U+202A–202E, U+2066–2069), zero-width chars (U+200B–200D, U+FEFF).
+1. NFC; drop C0/C1 controls, bidi overrides (U+202A–202E, U+2066–2069), zero-width chars (U+200B–200D, U+2060, U+FEFF).
 2. Collapse whitespace runs to one space; strip.
-3. `redact.redact(s)` (14) → matches become `[REDACTED:type]`. For **list items** (headings, tool names) an item containing a redaction is dropped instead (spec §7.2 "drop").
-4. Truncate to `cap` chars at a word boundary if one exists within the last 20 chars, append `…`.
+3. If the text contains a secret (`redact`, 14), the field or list item is **dropped**, not rewritten (spec §7.2 "drop"). Prose fields (doc headings, skill/agent/command descriptions, MCP purposes) then pass the injection filter (14 §4.4).
+4. Truncate to `cap` (14's rule), append `…`.
 
 Paths and identifiers (file names, table names, capability names) are not redacted: pointers must be exact, and secret-like files are already excluded (01). They are control-char stripped only.
 
@@ -392,6 +397,7 @@ Drop ranks (lower shrinks first): file/doc cards `changes with`=1, `tables`=2, `
 | `capabilities.describe` | dict[str,str] | `{}` | spec §16 |
 | `capabilities.live_timeout_ms` | int | 10000 | new |
 | `capabilities.live_env` | `"inherit"\|"minimal"` | `"inherit"` | new |
+| `capabilities.exclude` | list[str] | `[]` | new; ids or globs; `mcp:surf` always excluded (§4.8.2, 12 §4.5.3) |
 | `capabilities.harnesses`, `capabilities.user_level` | | | see 01 §5 |
 
 Budgets, churn thresholds and the token divisor are code constants tied to `CARD_FORMAT_VERSION`, not config, because changing them rewrites every card.

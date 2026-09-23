@@ -51,11 +51,12 @@ class CatalogReader(Protocol):
                    direction: Literal["out", "in", "both"] = "both",
                    limit_per_kind: int | None = None) -> list[EdgeView]: ...  # weight desc, other asc
     def id_for_path(self, path: str) -> SurfaceId | None: ...      # tree node only (code:/doc:), exact
+    def ids_for_path(self, path: str, *, casefold: bool = False) -> list[SurfaceId]: ...  # casefold may return several (08)
     def ids_for_suffix(self, suffix: str, *, casefold: bool = False) -> list[SurfaceId]: ...
     def ids_for_basename(self, name: str, *, casefold: bool = False) -> list[SurfaceId]: ...
     def capabilities(self) -> list[Card]: ...
     def content_cards(self) -> Iterator[Card]: ...                 # small-repo mode, eval A0
-    def content_card_count(self) -> int: ...
+    def content_card_count(self) -> int: ...                        # excludes mig: cards and external-stub tables (00 §4.1)
     def close(self) -> None: ...
 
 def open_catalog(paths: CatalogPaths, *, allow_rebuild: bool = True) -> CatalogReader | None
@@ -86,20 +87,35 @@ Default (`index.commit_catalog = false`, the recommendation in 06 §4.1 / Q-06-1
 ```
 .surf/
 ├── config.toml          committed
-├── eval/{dev,test}.yaml committed
-├── .gitignore           committed, written by init: "cache/\nlogs/\n"
+├── config.local.toml    ignored: personal project-local config layer (13 §4.1)
+├── mcp-listings.json    committed: live MCP listings for committable servers, an index input (02 §4.8.5)
+├── eval/                committed (16): dev.yaml, test.yaml, unsplit.yaml, wordings.yaml (optional),
+│                        test-runs.jsonl (test-set run log, 16 §4.11)
+├── .gitignore           committed, written by init: "cache/\nlogs/\nconfig.local.toml\n"
 ├── cache/               ignored
 │   ├── catalog.jsonl    canonical catalog (local build)
 │   ├── edges.jsonl
 │   ├── meta.json
+│   ├── overlay.jsonl    local-only cards (untracked files, user-level capabilities; 00 §4.1), merged at load
+│   ├── mcp-listings.json live listings for servers whose source isn't committable (02 §4.8.5)
 │   ├── index.sqlite     read snapshot, replaced atomically
 │   ├── build.sqlite     build state: extraction cache, file fingerprints, schema mentions (06)
 │   ├── cochange.state   gzip JSONL: CochangeWindow (04 §3)
+│   ├── last_refresh.json RefreshReport of the last refresh (06 §4.9)
 │   ├── refresh.lock     flock target (06)
 │   ├── refresh.pending  coalescing marker (06)
-│   └── leases/
+│   ├── tmp-<pid>/       publish staging (§4.4)
+│   ├── init.lock        `surf init` mutual exclusion (12)
+│   ├── judge_state.json persisted circuit breaker (07 §3.4)
+│   ├── log_salt         per-checkout HMAC salt for prompt hashes, 0600 (14 §3.4)
+│   ├── control/         project.json, sessions/<key>.json: on/off switches (12 §3.1)
+│   ├── leases/          <key>.json, <key>.lock, .gc (10 §3.3)
+│   ├── eval-fixtures/   judge fixture store in user repos (07 §3.5)
+│   ├── eval-runs/       default `surf eval` output dir (16 §3.8)
+│   ├── install.json     install manifest, non-git projects only (12 §3.2; git: <git-common-dir>/surf/)
+│   └── backups/         pre-install file backups, non-git projects only (12 §3.2; same rule)
 └── logs/                ignored
-    ├── decisions.jsonl
+    ├── decisions.jsonl  plus decisions.N.jsonl rotations and decisions.lock (15 §3.2)
     └── refresh.log
 ```
 
@@ -132,13 +148,16 @@ class Meta(BaseModel, frozen=True):
     counts: dict[SurfaceType, int]                     # sorted keys
     content_cards: int
     walk_mode: Literal["flat", "walk"]
+    descriptor: str                                    # derived project descriptor (02 §4.10); config overrides at query time
+    sanitizer: dict[str, int]                          # {"injection_hits": n} (14 §4.4)
+    tool_versions: dict[str, str]                      # e.g. {"sqlglot": "…"} (03) — volatile (warn only)
     files: dict[str, FileDigest]                       # "catalog.jsonl", "edges.jsonl"
     warnings: list[str]                                # sorted, deterministic (unparseable migrations, …)
     built_at: str                                      # RFC 3339 UTC — volatile
     build: dict[str, Any]                              # {"kind": "full"|"incremental", "ms": int} — volatile
 ```
 
-Volatile fields (`built_at`, `build`, `surf_version`, `git_version`) are ignored by `--check` equality. The spec's short hash (`"a1b2c3d"`) becomes a full hash (D-05-3).
+Volatile fields (`built_at`, `build`, `surf_version`, `git_version`, `tool_versions`) are ignored by `--check` equality. The spec's short hash (`"a1b2c3d"`) becomes a full hash (D-05-3).
 
 `content_fingerprint`: for each indexed file, `(path, id)` where `id` is the git blob sha from `git ls-files -s` for clean tracked files, or `git hash-object`-equivalent sha1 of the working-tree bytes for dirty and untracked files. Non-git: sha256 of the bytes. Sorted by path, joined `path\0id\n`, sha256. Because git blob ids are used for clean files, this is computable in CI from a checkout without reading every file.
 
@@ -250,6 +269,7 @@ Symmetric kinds (`co_change`, `dir_coupling`, `alias`) produce two rows, both `o
 | `subtree_files(code:src/x/)` | `SELECT id FROM paths WHERE path > 'src/x/' AND path < 'src/x0' AND path NOT LIKE '%/'` | `'0'` is the byte after `'/'`; `db:*` → all tables |
 | `edges_from(id, kinds, direction)` | `WHERE src=? AND kind IN (…) [AND outgoing=?] ORDER BY kind, weight DESC, dst` | `contains` rows come from `cards.parent` at build time; `limit_per_kind` applied in Python |
 | `id_for_path(p)` | `paths` PK | Exact, case-sensitive |
+| `ids_for_path(p, casefold=True)` | `paths_path_cf` | 08's fold fallback; several ids = ambiguous |
 | `ids_for_suffix(s)` | `suffixes` PK or `suffix_cf` | 08 queries suffixes longest-first: first non-empty answer wins, more than one id = ambiguous |
 | `ids_for_basename(b)` | `paths_basename[_cf]` | Files only |
 
@@ -307,7 +327,7 @@ The policy decision is 06 §4.1 (Q-06-1). This doc owns what `surf init` writes:
 
 | Policy | `.surf/.gitignore` | `.gitattributes` additions | Committed files |
 |---|---|---|---|
-| `commit_catalog=false` (default) | `cache/`, `logs/` | none | `config.toml`, `eval/` |
+| `commit_catalog=false` (default) | `cache/`, `logs/`, `config.local.toml` | none | `config.toml`, `eval/`, `mcp-listings.json` (if any) |
 | `commit_catalog=true` | same | `.surf/catalog.jsonl -diff linguist-generated=true`, `.surf/edges.jsonl -diff linguist-generated=true` | plus `catalog.jsonl`, `edges.jsonl`, `meta.json` at `.surf/` |
 
 `-diff` keeps review noise down. On a merge conflict in a committed baseline, `surf index --baseline` regenerates it and the user commits the result (no custom merge driver in v1; Q-05-2). `surf doctor` warns when a committed `catalog.jsonl` exceeds 20 MB.

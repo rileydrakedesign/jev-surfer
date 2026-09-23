@@ -219,7 +219,7 @@ Applies to `extract_caps.py` (02) when a server is in `capabilities.live_mcp`.
 | stderr | Read into a 4 KiB ring buffer, redacted, shown only in the error message on failure; never logged to file. |
 | HTTP servers | `https://` required, or `http://` only for loopback. No redirects across hosts. Auth headers only from config env references. 401/OAuth-required → mark `listing: "unavailable"` and fall back to the one-line purpose prompt (spec §7.6 step 4). |
 | Storage | Committed catalog stores server name, transport, `command` **basename** only, URL with userinfo and query stripped (00 §4 rule 5), tool names, sanitized purpose. Never env values or headers. |
-| User-level configs | Capabilities discovered from user-level configs (`~/.codex/…`, user Claude settings; opt-in `capabilities.user_configs`) are written to `.surf/cache/user_caps.jsonl`, **not** the committed catalog, so one developer's private servers don't land in the repo (D-14-4; 02/05 must honor this). |
+| User-level configs | Capabilities discovered from user-level configs (`~/.codex/…`, user Claude settings; opt-in `capabilities.user_configs`) are written to `.surf/cache/overlay.jsonl` (the local-only card overlay, 00 §4.1), **not** the committed catalog, so one developer's private servers don't land in the repo (D-14-4; 02/05 must honor this). |
 
 ### 4.6 Git hook script
 
@@ -239,7 +239,7 @@ Installed for `post-commit`, `post-merge`, `post-checkout`, `post-rewrite`; only
 
 | Property | How |
 |---|---|
-| Never blocks git | Backgrounded subshell; stdio detached; `|| true`; no `set -e` inside the block |
+| Never blocks git | Backgrounded subshell; stdio detached; `\|\| true`; no `set -e` inside the block |
 | Never fails git | Post-hooks can't abort git anyway; block can't return non-zero |
 | No untrusted input | Hook arguments (`$1 $2 $3`, refs, rewritten SHAs) are ignored; `surf refresh --changed` recomputes from git itself |
 | No network | `refresh` never makes network calls; live MCP listing is skipped under `SURF_HOOK=1` |
@@ -252,7 +252,7 @@ Trust note: the hook resolves `surf` via `PATH`, the same trust as any developer
 
 ### 4.7 Adversarial fixtures (with 16-evaluation)
 
-A synthetic repo `bench/repos/adversarial/` (16 §3.9) plus overlays that inject into the two benchmark repos:
+A synthetic repo `bench/repos/adversarial.yaml` (16 §3.10) plus overlays that inject into the two benchmark repos:
 
 | Fixture id | Planted surface | Attack |
 |---|---|---|
@@ -311,7 +311,7 @@ Assets: source code and secrets in the repo, prompt text, developer identity, in
 | T10 | Real prompts committed in eval sets | developer | `.surf/eval/*.yaml` | `surf eval validate` flags secrets/emails; labeling guide says scrub | Business-sensitive prompt wording |
 | T11 | Judge response tampering | network attacker, rogue gateway | MITM | TLS verify; probabilities validated in [0,1], unknown keys dropped (07) | Misroute only |
 | T12 | Hook abuse / supply chain | dependency or PATH attacker | `surf` on PATH, deps | pinned lockfile; plain-text hooks; minimal deps | Same as any CLI |
-| T13 | DoS of the host harness | huge prompt, pathological regex | 1 MB pasted log; user pattern with catastrophic backtracking | 64 KiB pre-cap; built-ins linear; user patterns linted (§6) ; route deadline; fail-open | Linting is heuristic |
+| T13 | DoS of the host harness | huge prompt, pathological regex | 1 MB pasted log; user pattern with catastrophic backtracking | 64 KiB pre-cap; built-ins linear; user patterns linted (§6); route deadline; fail-open | Linting is heuristic |
 | T14 | Protocol corruption | surf itself | stray stdout in hook/MCP | 00 §6 logging rule; tests assert stdout = payload only | — |
 
 ### 4.10 README non-affiliation note (spec §0.1)
@@ -421,7 +421,7 @@ Names follow 13-config (`section.key`).
 | D-14-1 | §18.1 `prompt_hash: "sha256:…"` | `hmac-sha256` with a per-checkout random salt in `.surf/cache/log_salt` | Unsalted hashes of short prompts are dictionary-reversible. Cost: hashes don't compare across machines |
 | D-14-2 | §19.3 redaction replaces matches everywhere | Cards **drop** secret-bearing items at index time (spec §7.2); prompts get `[REDACTED:type]` | The spec states both; this doc assigns each to its channel. A dropped heading keeps the card clean and hash-stable |
 | D-14-3 | §19.2 `systemone-local` means nothing leaves the machine | True only for loopback/private endpoints; doctor/status report a remote endpoint | The backend accepts any URL |
-| D-14-4 | §7.6 reads user-level configs on opt-in (storage unspecified) | User-level capabilities live in `.surf/cache/user_caps.jsonl`, never the committed catalog | Prevents one developer's private servers leaking into the repo |
+| D-14-4 | §7.6 reads user-level configs on opt-in (storage unspecified) | User-level capabilities live in `.surf/cache/overlay.jsonl` (the local-only card overlay, 00 §4.1), never the committed catalog | Prevents one developer's private servers leaking into the repo |
 | D-14-5 | §7.6 live mode on user opt-in | Servers defined by a project config aren't live-listed unless named individually after a warning | A cloned repo's `.mcp.json` is untrusted code |
 | D-14-6 | §19.4 prose is "capped and sanitized" | Adds a deterministic injection filter (R1–R4) and `injection_flags` reporting | Gives the adversarial gates a lever beyond length caps |
 | D-14-7 | §12.2 lease stores `task_request` | Stores the redacted request | Only the redacted form is ever sent; the raw form has no use |

@@ -28,8 +28,9 @@ The on-disk catalog: canonical JSONL files (source of truth), `meta.json`, and t
 class CatalogPaths(BaseModel, frozen=True):
     root: Path                         # repo root
     surf_dir: Path                     # <root>/.surf
-    catalog_dir: Path                  # .surf/ if commit_catalog else .surf/cache/   (§3.1)
-    cache_dir: Path                    # .surf/cache/
+    catalog_dir: Path                  # always .surf/cache/ : the working catalog every reader uses (§3.1)
+    baseline_dir: Path | None          # .surf/ when index.commit_catalog = true, else None
+    cache_dir: Path                    # .surf/cache/ (same as catalog_dir in v1; kept separate for clarity)
     @classmethod
     def resolve(cls, root: Path, cfg: Config) -> CatalogPaths: ...
 

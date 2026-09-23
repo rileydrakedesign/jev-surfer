@@ -211,7 +211,7 @@ def main() -> None:                              # surf-hook
         sys.exit(0)
 ```
 
-- The fast ack skip uses the **default** ack list unless the config file's raw text contains `ack_words` (checked with `tomllib`, which is stdlib and fast). The full pydantic config load is only on the slow path.
+- The fast ack skip reads `router.skip.*` with `config.raw_peek` (stdlib `tomllib` only, 13 §4.8) and falls back to the default ack list when the key is absent or invalid. The full pydantic config load is only on the slow path.
 - With a lease, the previous message comes from `lease.last_request` inside the pipeline (10 §4.7). The transcript is read only when there's no active lease, e.g. the first routed prompt after installing surf mid-session, or after a compaction expired the lease.
 
 #### 4.4.4 Transcript reader (`_cc_transcript.py`)
@@ -499,7 +499,7 @@ Exit: 0 when there are no errors (warnings allowed); 4 when any error; with `--s
 | `surf on` / `surf off` | enable / disable | `--session ID` (else project scope) | 0; 3 |
 | `surf reroute` | expire the session's lease | `--session ID` (or `SURF_SESSION`), `--all` | 0; 2 when no session and no `--all` |
 | `surf uninstall` | remove integrations (§4.9) | `--purge`, `--keep KIND`, `--yes`, `--json` | 0; 7 aborted; 1 partial failure (the report lists what remains) |
-| `surf config` | show / validate config (13) | `show [--origin] [--json]`, `validate`, `path` | 0; 5 invalid |
+| `surf config` | show / validate config (13) | `show [--origin] [--defaults] [--toml] [--json]`, `validate [--strict]`, `path` | 0; 5 invalid (`--strict`: unknown keys too) |
 | `surf hook claude <event>` | hidden alias of `surf-hook` | | always 0 |
 
 Exit code table:

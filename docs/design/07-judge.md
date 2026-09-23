@@ -316,7 +316,7 @@ httpx.Timeout(connect=min(500, t), read=t, write=t, pool=t) and asyncio.timeout(
 ```
 
 - Default `judge.timeout_ms` = 1,200 (spec §13.3). `llm` default 20,000; `systemone-local` default 3,000.
-- The route (3,000 ms) and walk (2,000 ms) budgets are enforced by the router passing the tighter `Deadline` in `ctx` (09 §4.9).
+- The route (3,000 ms) and walk (2,000 ms) budgets are enforced by the router passing the tighter `Deadline` in `ctx` (09 §4.2).
 - Cold start: the hook process opens fresh TLS connections on every prompt (~100–250 ms on first request). The router fires call 1 and speculative walk level 1 together so the handshakes overlap. `surf doctor --live` reports cold vs warm latency.
 
 ### 4.6 Retry-once policy
@@ -384,7 +384,7 @@ def thresholds_for(cfg: RouterConfig, judge: Judge) -> tuple[Thresholds, bool]: 
     return BUILTIN["jev"], False            # uncalibrated: doctor warns, decision record flags it
 ```
 
-Model-qualified tables (`[router.thresholds."jev:jev-1.14.0"]`) let a model upgrade ship new thresholds without breaking the pinned eval. Only `jev` defaults ship as calibrated in v1; the `Thresholds` field list is owned by 09 §5.2 and schema-validated by 13.
+Model-qualified tables (`[router.thresholds."jev:jev-1.14.0"]`) let a model upgrade ship new thresholds without breaking the pinned eval. Only `jev` defaults ship as calibrated in v1; the `Thresholds` field list is owned by 09 §5 and schema-validated by 13.
 
 ### 4.10 Backends
 

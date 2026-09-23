@@ -347,7 +347,7 @@ Strengths (1.0 / 0.9 / 0.8, fold × 0.9) are module constants, not config: chang
 | Path of an excluded/secret file | no match |
 | Path escaping the repo (`../../other-repo/src/x.ts`) | `..` resolved lexically → `other-repo/src/x.ts`; matches only if this repo has that suffix (then it's likely the same layout; accepted risk) |
 | Catalog index missing `paths` table (old cache) | `SqlitePathIndex` rebuilds the table from the catalog once (05), or falls back to `TriePathIndex` |
-| Regex error / unexpected exception | pipeline guard: path matching returns empty result, route continues (fail open per stage, 09 §6) |
+| Regex error / unexpected exception | pipeline guard: path matching returns empty result, route continues (fail open per stage, 09 §4.1) |
 
 ---
 

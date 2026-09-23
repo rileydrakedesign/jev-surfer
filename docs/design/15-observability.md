@@ -307,7 +307,7 @@ Nearest-rank percentile: `sorted(x)[ceil(q·n) − 1]`; `n < 20` prints percenti
 
 ### 4.6 Eval runs
 
-`surf eval` routes through the same pipeline, but records go to `<run_dir>/decisions.jsonl` with `adapter=eval`, never to `.surf/logs/`. That keeps `surf stats` about real usage, and the eval run directory self-contained (16 §4.9).
+`surf eval` routes through the same pipeline, but records go to `<run_dir>/decisions.jsonl` with `adapter=eval`, never to `.surf/logs/`. That keeps `surf stats` about real usage, and the eval run directory self-contained (16 §3.8).
 
 ---
 

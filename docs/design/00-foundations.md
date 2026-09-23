@@ -165,6 +165,17 @@ The spec commits `catalog.jsonl`, `edges.jsonl` and `meta.json`, and CI runs `su
 5. **No environment leakage.** Absolute paths, usernames, hostnames and env values never appear in committed files. Live-MCP listings are stored with the server's `command` basename only; URLs have credentials and query strings stripped.
 6. **Stable tie-breaks.** Every "top N" (partners, tables, child files) sorts by score desc, then id asc.
 
+### 4.1 Commit policy and the local-only overlay (amended after 01/05/06/14)
+
+- **Proposed default: `index.commit_catalog = false`** (05 D-05-1, 06 D-06-1, open question Q-06-1). The catalog lives in `.surf/cache/`, and the router **always reads `cache/`** (05 D-05-5). A committed catalog is an opt-in *baseline* that changes only via `surf index --baseline`; git hooks only ever write to `cache/`. The determinism rules above still apply to both, because `--check` and the eval fixtures rely on them.
+- **Local-only cards.** A card is committable only if every input it was built from is committable (01 D-01-1). Cards built from untracked files or user-level capability configs go to **`.surf/cache/overlay.jsonl`** and are merged at load time. This is the only name for that file; 13 and 14 refer to it.
+- **Stored edge set.** `contains` edges aren't written to `edges.jsonl` (they're derived from `Card.parent`), and symmetric kinds (`co_change`, `dir_coupling`, `alias`) are stored once with `from < to` (04 D-04-1, D-04-4). **Nothing outside `catalog/` reads the JSONL files directly**; use the store API in 05.
+- **Small-repo count.** `mig:` cards and external stub tables (03 D-03-3) don't count as content cards for `router.small_repo_cutoff`.
+
+### 4.2 Clock
+
+The injected `Clock` exposes `monotonic()` (deadlines only) and `wall()` (lease idle expiry, log timestamps) separately, so the eval runner can simulate wall time across sequence turns without affecting deadlines (16).
+
 ---
 
 ## 5. Error model: fail open, always
@@ -193,10 +204,10 @@ The spec's principle 6 is enforced structurally:
 | Distribution name | `jev-surfer` on PyPI (the name `surf` is very likely taken); import package `surf`; console script `surf`. (Q-F1) |
 | Python | 3.11+. `from __future__ import annotations` everywhere. |
 | Tooling | `uv` for env and lockfile; `ruff` (lint + format); `pyright` in strict mode for `surf/`; `pytest`. |
-| Layout | `src/surf/…` (src layout) with the module tree from spec §22.2, plus `surf/model.py`, `surf/ids.py`, `surf/deadline.py`. |
+| Layout | `src/surf/…` (src layout) with the module tree from spec §22.2, plus `surf/model.py`, `surf/ids.py`, `surf/deadline.py`, `surf/proc.py`, and modules added by the design docs: `eval/bootstrap.py`, `eval/flat.py`, `eval/label.py`, `log/explain.py`, `log/stats.py` (16, 15). surf's own benchmark (pinned external repos, synthetic repos, datasets, fixtures, baselines) lives in top-level `bench/` (16 D-16-8). `redact.py` is a Phase 0 deliverable because the bootstrap card builder uses its sanitizer. |
 | Dependencies | Only those in spec §22.1. Anything new needs a line in the relevant design doc saying why. |
 | Pure core | `index/`, `graph/`, `route/`, `lease/` take their inputs as arguments (catalog, config, judge, clock). No module reads config or env on import. This makes every piece unit-testable with the fixture judge. |
-| Clock | Injected `Clock` protocol (`now()`, `monotonic()`); tests use a fake clock. |
+| Clock | Injected `Clock` protocol (`wall()`, `monotonic()`; see §4.2); tests use a fake clock. |
 | Subprocesses | `git` and `rg` only, invoked through `surf/proc.py` with timeouts and `LC_ALL=C`. Never `shell=True`. **One exception:** opt-in live MCP listing (`index/extract_caps.py`) spawns the user-configured server commands, under the isolation rules in `02-cards.md` and `14-security-privacy.md`. |
 | Small shared helpers | `index/globs.py` (gitignore-style matcher, so `pathspec` isn't needed) and `index/frontmatter.py` (minimal YAML-subset frontmatter parser, so PyYAML isn't a runtime dependency). |
 | Logging | stdlib `logging` to stderr for humans; decision records are a separate channel (`log/decisions.py`). Nothing is ever printed to stdout from the hook or MCP paths except the protocol payload. |

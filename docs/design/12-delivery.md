@@ -2,7 +2,7 @@
 
 **Status:** draft for review
 **Spec sections:** §15 (all), §11.2 (control commands, disabled routing), §12.5 (session identity), §10.1 (git hooks, SessionStart trigger), §18.2 (`surf stats`), §19.1 (init privacy table)
-**Depends on:** 00-foundations, 05-catalog-store, 06-refresh (what `surf refresh` does; this doc owns hook *installation*), 07-judge (breaker state for `status`/`doctor`), 09-router (`route()`), 10-lease, 11-note, 13-config, 14-security-privacy, 15-observability (`--explain`, `stats`), 16-evaluation (`surf eval`)
+**Depends on:** 00-foundations, 05-catalog-store, 06-refresh (refresh, freshness checks and git hook installation; this doc orchestrates them), 07-judge (breaker state for `status`/`doctor`), 09-router (`route()`), 10-lease, 11-note, 13-config, 14-security-privacy, 15-observability (`--explain`, `stats`), 16-evaluation (`surf eval`)
 **Code:** `surf/cli.py`, `surf/runtime.py` (new), `surf/control.py` (new), `surf/adapters/claude_code.py`, `surf/adapters/_cc_transcript.py` (new), `surf/adapters/mcp_server.py`, `surf/adapters/instructions.py`, `surf/adapters/git_hooks.py` (installation logic owned by 06 §4.8; called from here), `surf/adapters/_jsonfile.py` (new; safe JSON settings editing), `surf/install/manifest.py` (new)
 
 ---
@@ -440,10 +440,10 @@ surf doctor [--live] [--strict] [--json]
 | `python` | Python ≥ 3.11 | error |
 | `config.parse` | config files parse and validate (13) | error |
 | `config.unknown_keys` | unknown keys (typos) | warn |
-| `index.present` | `catalog.jsonl`, `edges.jsonl`, `meta.json` exist; `schema_version` supported | error |
+| `index.present` | catalog, edges and meta exist in `.surf/cache/` (05); `schema_version` supported | error |
 | `index.fresh` | 06 `check_freshness(deep=True)` | warn |
-| `index.cache` | SQLite cache present and consistent with JSONL digest (else rebuilt) | info |
-| `index.size` | catalog > 20 MB → suggest `index.commit_catalog = false` (spec §9.5) | warn |
+| `index.cache` | SQLite snapshot present and consistent with the JSONL files (05; else rebuilt) | info |
+| `index.size` | committed baseline > `index.max_catalog_mb_warn` (20 MB) → suggest `index.commit_catalog = false` (spec §9.5) | warn |
 | `git.history` | < 200 commits or shallow clone → suggest `git fetch --unshallow` (spec §8.2.6) | warn |
 | `git.hooks` | 06 `verify(root)`: blocks present and executable, or manager entries present; manual steps pending | warn |
 | `claude.hooks` | settings entries present; `<CMD>` resolves and runs `surf-hook --version` in < 1 s | warn (error if harness selected at init) |
@@ -454,7 +454,7 @@ surf doctor [--live] [--strict] [--json]
 | `judge.key` | API key env var for the configured provider is set | error (unless backend `null`/`fixture`) |
 | `judge.ping` (`--live`) | one minimal judge request (1 Noul, no repo data) succeeds within `judge.timeout_ms` | error |
 | `judge.breaker` | breaker state (07) closed | warn |
-| `judge.thresholds` | a threshold set exists for the active backend (13) | warn |
+| `judge.thresholds` | the active threshold profile is calibrated (07 §4.9); a user table under `router.thresholds.<profile>` validates (13) | warn |
 | `rg` | ripgrep found (else Python fallback) | info |
 | `dirs.writable` | `.surf/cache/`, `.surf/logs/` writable | error |
 | `hook.import_time` | `surf-hook` fast path under budget (§7) on this machine | warn |
@@ -579,7 +579,7 @@ class RouteOutput(BaseModel):
 | Hook stdin empty / not JSON | exit 0, no output |
 | Hook payload without `session_id` | route without lease |
 | `cwd` outside any surf project | exit 0, no output (fast path, no heavy import) |
-| Index missing / corrupt | `index-missing`, no note; SessionStart does **not** trigger a full build |
+| Index missing / corrupt | `index-missing`, no note; SessionStart's `ensure_fresh` starts a background full build (06), so later prompts in the session route normally |
 | Judge key missing | `judge-unavailable`, no note; `doctor` reports it |
 | Hook exceeds Claude Code's `timeout` | Claude Code kills it; the route deadline (3 s from process start) makes this unlikely. The decision log may miss the record (acceptable) |
 | Transcript unreadable / format changed | `previous_message=None`; routing continues |

@@ -76,7 +76,7 @@ These are gaps in the spec. The resolutions below are **proposals** and are also
 |---|---|---|
 | F1 | The schema root's id isn't given (`db:` prefix only). | `db:*`. `*` can't be a table name. |
 | F2 | `doc_dir` vs `code_dir` is decided by "docs dominate", so a directory's **id prefix can flip** when its contents change. That would churn edges, leases and eval labels. | Ids for **directories** keep the prefix chosen by a stable rule: `doc:` if > 50 % of recursive files are doc files **and** the dir isn't the repo root, else `code:`. The flip is treated as remove + add by refresh. Anything that compares directories by identity (eval labels, lease re-validation, path hits) compares by **path**, via `path_of()`, never by prefix. |
-| F3 | Migrations are "also indexed as files", so one file could have two ids (`code:…sql` and `mig:…sql`). | The file keeps **one tree node**: `code:<path>` (walked, path-hit, co-changed like any file). A separate `mig:<path>` card exists **outside the tree** (no parent in the walk, parent = `db:*` for bookkeeping) and carries `defined_in` edges from tables. An `alias` edge links `code:<path>` ↔ `mig:<path>` so either one resolves to the other. The note renders migrations from the `mig:` id. |
+| F3 | Migrations are "also indexed as files", so one file could have two ids (`code:…sql` and `mig:…sql`). | The file keeps **one tree node**: `code:<path>` (walked, path-hit, co-changed like any file). A separate `mig:<path>` card exists **outside the tree** (`parent = None`, no `contains` edge) and carries `defined_in` edges from tables. An `alias` edge links `code:<path>` ↔ `mig:<path>` so either one resolves to the other. The note renders migrations from the `mig:` id. |
 | F4 | Which prefix does a `.md` file inside `src/` get? | Files: prefix by **file type**, never by location. Any doc extension (§7.4) → `doc:`; everything else → `code:`. |
 
 ---
@@ -197,7 +197,8 @@ The spec's principle 6 is enforced structurally:
 | Dependencies | Only those in spec §22.1. Anything new needs a line in the relevant design doc saying why. |
 | Pure core | `index/`, `graph/`, `route/`, `lease/` take their inputs as arguments (catalog, config, judge, clock). No module reads config or env on import. This makes every piece unit-testable with the fixture judge. |
 | Clock | Injected `Clock` protocol (`now()`, `monotonic()`); tests use a fake clock. |
-| Subprocesses | `git` and `rg` only, invoked through `surf/proc.py` with timeouts and `LC_ALL=C`. Never `shell=True`. |
+| Subprocesses | `git` and `rg` only, invoked through `surf/proc.py` with timeouts and `LC_ALL=C`. Never `shell=True`. **One exception:** opt-in live MCP listing (`index/extract_caps.py`) spawns the user-configured server commands, under the isolation rules in `02-cards.md` and `14-security-privacy.md`. |
+| Small shared helpers | `index/globs.py` (gitignore-style matcher, so `pathspec` isn't needed) and `index/frontmatter.py` (minimal YAML-subset frontmatter parser, so PyYAML isn't a runtime dependency). |
 | Logging | stdlib `logging` to stderr for humans; decision records are a separate channel (`log/decisions.py`). Nothing is ever printed to stdout from the hook or MCP paths except the protocol payload. |
 
 ### 6.1 Test strategy (shared)

@@ -71,7 +71,7 @@
 
 | Id | What the docs assume | Where it lives | If wrong |
 |---|---|---|---|
-| J-C1 | There's no hard API limit below **40 questions per request** (40 is our own cap, spec principle 5) | 07 §4.2; 13 `judge.max_questions_per_request`; 09 `chunk_size` | If the API cap is lower, lower the default and note the latency impact in 09 §4.14 |
+| J-C1 | There's no hard API limit below **40 questions per request** (40 is our own cap, spec principle 5) | 07 §4.2; 13 `judge.max_questions_per_request`; 09 `chunk_size` | If the API cap is lower, lower the default and note the latency impact in 09 §4.15 |
 | J-C2 | Choice supports up to **255 options** (spec §20) | 07 §2.2 | Fix the number (v1 uses 3) |
 | J-C3 | Request size: our estimate caps requests at 8,000 tokens (`judge.max_request_tokens`) and the prompt is truncated to ~1,500 tokens head+tail | 07 §4.2; 09 (request truncation); 14 §4.2 redaction pipeline | Set the cap from the documented context limit |
 | J-C4 | Token estimate is `ceil(utf8_bytes / 4)` | 02 D-02-1 / Q-02-1; 07 §4.8 | If TypeSafe documents a tokenizer or counting endpoint, note it in Q-02-1 (the divisor changes only with a format-version bump) |
@@ -111,7 +111,7 @@
 | Id | What the docs assume | Where it lives | If wrong |
 |---|---|---|---|
 | J-G1 | The spec §20 table matches TypeSafe's jev-1.13 jaggedness notes: accuracy drops with large, irrelevant state; instructions are read literally; weak at numbers and dates; susceptible to adversarial state | spec §20; 09 (≤ 40 candidates, bounded state); 14 | Add any missing limitation to `open-questions.md` with a proposed design response. Don't edit the spec. |
-| J-G2 | Behavior with many near-duplicate candidates (40 file cards from one directory) | 09 §4.8 walk chunking; 02 cards | Note it; it informs the chunk ordering and flatten rules (eval decides) |
+| J-G2 | Behavior with many near-duplicate candidates (40 file cards from one directory) | 09 §4.9 walk chunking; 02 cards | Note it; it informs the chunk ordering and flatten rules (eval decides) |
 | J-G3 | Recommended question phrasing (positive statements, "likely" vs "is") | 09 §3.3 wordings; 16 `wordings.yaml`; spec §25 Q1 | Add documented guidance as candidate wordings in 16, not as shipped wordings |
 | J-G4 | Language support (non-English prompts, identifiers) | 14 redaction; 09 | Record it |
 
@@ -193,7 +193,7 @@ Fill in one row per check. Keep "Evidence" to a URL plus a short quote.
 | J-C3 | confirmed (cap kept) | https://docs.typesafe.ai/models: "64k tokens per request; 32k tokens for `state` plus the longest question" | 07 §4.2; 13 range 1,000–64,000 for `judge.max_request_tokens` (default 8,000 kept for accuracy) |
 | J-C4 | unanswerable → Phase 0 | No tokenizer or counting endpoint documented; responses report `usage.input_tokens`. Examples show ~296 tokens for a 1-question request (fixed overhead) | 02 Q-02-1, 07 §4.8 |
 | J-C5 | unanswerable | No length limit for instructions or criteria beyond the context budget | none |
-| J-D1 | confirmed | https://docs.typesafe.ai/concepts/how-to-build-with-system-one: "Most queries complete in about 100 ms"; consistency cookbooks: 111 ms / 114 ms mean round trip | 07 §4.5, 09 §4.14 (note); targets look reachable, `open-questions.md` §1 row 6 unaffected |
+| J-D1 | confirmed | https://docs.typesafe.ai/concepts/how-to-build-with-system-one: "Most queries complete in about 100 ms"; consistency cookbooks: 111 ms / 114 ms mean round trip | 07 §4.5, 09 §4.15 (note); targets look reachable, `open-questions.md` §1 row 6 unaffected |
 | J-D2 | confirmed | https://docs.typesafe.ai/primitives: "System One models evaluate every question in a request in parallel. Adding questions barely changes the response time" | 09 Q-09-3 (resolved pending the Phase 0 curve) |
 | J-D3 | corrected | https://docs.typesafe.ai/models: "250,000 tokens per second / 1,200 requests per minute", "can change without notice"; https://docs.typesafe.ai/cookbooks/entity_alignment: "the public endpoint rate-limits above roughly eight" | 07 §4.4, §5, D-07-8; 13 default 8; 16 §7 |
 | J-D4 | corrected (not guaranteed) | https://docs.typesafe.ai/models: SDKs "honor the `retry-after` header when the response carries one"; SDK also reads `retry-after-ms` | 07 §4.6 |
@@ -201,7 +201,7 @@ Fill in one row per check. Keep "Evidence" to a URL plus a short quote.
 | J-D6 | unanswerable → Phase 0 | HTTP/2 not mentioned | 07 Q-07-3 |
 | J-D7 | corrected | No "early access" wording; https://docs.typesafe.ai/models warning: "Rate limits are adjusting dynamically … Higher limits are available on custom and enterprise plans." No SLA in docs; MCA has a generic service warranty | spec §20 row "Hosted, early access" is stale (Q-09-12 lists spec §20 updates); breaker defaults unchanged |
 | J-G1 | corrected (gaps) | https://docs.typesafe.ai/model-jaggedness/jev-1.13 lists 9 modes; spec §20 misses indirection, contradictory instructions/criteria, structural invariants, generation, language | 09 Q-09-12; `open-questions.md`; jev-reference §10 (spec not edited) |
-| J-G2 | unanswerable | Not documented. Related advice: structured option descriptions with `not_for` separate lookalikes (https://docs.typesafe.ai/primitives/advanced) | none; eval decides (09 §4.8) |
+| J-G2 | unanswerable | Not documented. Related advice: structured option descriptions with `not_for` separate lookalikes (https://docs.typesafe.ai/primitives/advanced) | none; eval decides (09 §4.9) |
 | J-G3 | confirmed (guidance found) | https://docs.typesafe.ai/primitives/noul: "Phrase the question so that a high value means yes … A statement works as well as a question"; backticked state paths; structured instructions; Noul `criteria` | 16 Q-16-9 (candidates only) |
 | J-G4 | confirmed | https://docs.typesafe.ai/models: "English is the primary training language … Other languages, including CJK scripts, are handled but not equally well" | 09 Q-09-12 |
 | J-E1 | corrected | https://openrouter.ai/docs/guides/community/typesafe-sdk: requests go to "`https://openrouter.ai/api/v1/systemone`"; "`jev-1.13` is routed as `typesafe/jev-1.13`"; responses "contain `model`, `answers`, and `usage`" plus `id`, `provider`, `usage.cost`; errors `{"error":{"code","message"}}`, adds 402 | 07 §3.2 (native envelope, id `typesafe/jev-1.13`, 402 → `AUTH`) |

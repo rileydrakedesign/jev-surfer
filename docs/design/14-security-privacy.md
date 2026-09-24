@@ -153,7 +153,7 @@ The sanitizer is deterministic and part of card inputs, so a change to it change
 
 | # | Egress | When | Payload | Controls |
 |---|---|---|---|---|
-| E1 | Judge request (`jev`, `llm`, remote `systemone-local`) | per route; `surf doctor --live` ping | JSON state + questions: redacted prompt/previous task/last message, project descriptor, card strings | redaction on all strings; caps (≤ 40 questions, prompt ≤ ~1,500 tokens); TLS verify on |
+| E1 | Judge request (`jev`, `llm`, remote `systemone-local`) | per route; `surf doctor --live` ping | JSON state + questions: redacted prompt/previous task/last message, project descriptor, card strings | redaction on all strings; caps (per-backend request limits, prompt ≤ ~1,500 tokens, state ≤ ~2k tokens); TLS verify on |
 | E2 | Live MCP listing (HTTP servers) | `surf init --live-mcp`, `surf index` when `capabilities.live_mcp` lists the server | MCP `server/discover` (or legacy `initialize`) + `tools/list` only | opt-in per server; §4.5 |
 | E3 | Live MCP listing (stdio servers) | same | none directly; the child process may do its own networking | opt-in per server; the user already runs this server in their harness |
 | — | Telemetry, update checks, crash reports | never | — | no code path exists; a test asserts it (§8) |
@@ -204,7 +204,7 @@ Design choices:
 - Filter, don't reject: dropping every skill description that says "Use this skill whenever…" would destroy capability recall. R1 only fires on *request-universal* claims, not on "use when writing migrations".
 - `injection_flags()` records which rules fired; counts go into `meta.json` (`sanitizer.injection_hits`) and `surf doctor` lists the affected ids so a human can see a poisoned doc.
 - The filter changes card text, so it's part of card inputs (hash).
-- It is a heuristic. The load-bearing defenses remain structural: no code/comments in cards, ≤ 40 candidates, routing grants nothing, the note says "use your normal search", and the adversarial eval gate (§4.7).
+- It is a heuristic. The load-bearing defenses remain structural: no code/comments in cards, bounded state (≈ 2k tokens), routing grants nothing, the note says "use your normal search", and the adversarial eval gate (§4.7).
 
 ### 4.5 Live MCP listing isolation
 
@@ -303,7 +303,7 @@ Assets: source code and secrets in the repo, prompt text, developer identity, in
 | T1 | Secret in prompt sent to judge | developer (accidental) | pasted logs, `.env` contents in prompt | §4.2 redaction; head/tail cap | Unknown key formats below the entropy rule |
 | T2 | File contents sent to judge | — | card builder bug | cards built from metadata only; canary egress test (§8) | Doc headings/titles are content by design |
 | T3 | Secret file indexed | — | `.env`, keys in repo | §3.2 globs; never opened | Secrets in ordinary source files (bodies never read, so not exposed) |
-| T4 | Routing manipulation | malicious contributor, third-party docs | doc headings, skill/MCP descriptions, file names | §4.4 filter; caps; ≤ 40 candidates; adversarial gates §4.7 | Misleading pointer or advisory skip; recoverable by design (spec §19.4). TypeSafe confirms the premise and offers no server-side mitigation: "State is data, and `jev-1.13` does not treat it as hostile by default. Content written to adversarially steer the model … can move the answer"; its advice is explicit criteria and testing. Cards go into `instructions`, not `state`, so the same caution applies to both |
+| T4 | Routing manipulation | malicious contributor, third-party docs | doc headings, skill/MCP descriptions, file names | §4.4 filter; card caps; bounded state; adversarial gates §4.7 | Misleading pointer or advisory skip; recoverable by design (spec §19.4). TypeSafe confirms the premise and offers no server-side mitigation: "State is data, and `jev-1.13` does not treat it as hostile by default. Content written to adversarially steer the model … can move the answer"; its advice is explicit criteria and testing. Cards go into `instructions`, not `state`, so the same caution applies to both |
 | T5 | Agent-context injection via note | malicious contributor | crafted path/name with newlines | §4.3 `path_is_safe`, `safe_name`, no prose in note | None known |
 | T6 | Code execution at index time | malicious repo | project `.mcp.json` + `--live-mcp` | project-defined servers not live by default; per-server consent showing argv | User consents to a malicious command |
 | T7 | Malicious MCP server abuses the listing session | configured server | sampling/roots requests, huge output, echoing tokens | empty client caps; −32601; output caps; env-value scrub; timeout | Server's own side effects on spawn |

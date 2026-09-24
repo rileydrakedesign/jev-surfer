@@ -370,7 +370,7 @@ Nearest-rank percentile: `sorted(x)[ceil(q·n) − 1]`; `n < 20` prints percenti
 | Lock timeout path: hold the lock in another process for 1 s; `append` returns in ≤ 60 ms and the record is written | integration |
 | Rotation arithmetic: sizes, names, oldest deleted | unit |
 | Unwritable dir: `append` doesn't raise; one stderr warning | unit |
-| `--explain` golden files: small-repo route, walk route with guard + deadline, lease reuse, error, flat mode (Phase 1) — fixture judge, fake clock (latency fixed) | golden |
+| `--explain` golden files: flat-mode route (the default below `router.flat_max_tokens`), walk route with guard + deadline, lease reuse, error, forced flat mode on a large repo (Phase 1) — fixture judge, fake clock (latency fixed) | golden |
 | `--explain --json` validates against the `RouteTrace` model | unit |
 | `surf stats` golden over a synthetic log of 500 records with known distribution; percentile correctness; `(gone)` marking; corrupt-line counting | golden |
 | Hook ordering: stdout payload is flushed before the append (stub `DecisionLog.append` to sleep; measure time-to-payload) | integration |

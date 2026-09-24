@@ -535,7 +535,7 @@ class RouteOutput(BaseModel):
   "root": "/abs/path",
   "enabled": {"effective": true, "disabled_by": null, "project": true, "session": null},
   "index": {"present": true, "schema_version": 1, "index_head": "a1b2c3d", "head": "a1b2c3d",
-            "stale": false, "built_at": "…", "content_cards": 2189, "walk_mode": "walk",
+            "stale": false, "built_at": "…", "content_cards": 2189, "route_mode": "walk",
             "refresh_running": false},
   "judge": {"backend": "jev", "provider": "typesafe", "model": "jev-1.13.0", "key_present": true,
             "breaker": {"state": "closed", "open_until": null}},
@@ -552,7 +552,7 @@ class RouteOutput(BaseModel):
 
 | Command | Schema | Fields |
 |---|---|---|
-| `index` | `surf.index/1` | `counts`, `content_cards`, `walk_mode`, `duration_ms`, `index_head`, `check: {ok, added[], removed[], changed[]} \| null` (lists capped at 50) |
+| `index` | `surf.index/1` | `counts`, `content_cards`, `route_mode` (flat or walk, from meta `flat_card_tokens` and the effective `router.flat_max_tokens`, 09 §4.5), `duration_ms`, `index_head`, `check: {ok, added[], removed[], changed[]} \| null` (lists capped at 50) |
 | `refresh` | `surf.refresh/1` | `skipped: null\|"busy"\|"fresh"`, `changed_files`, `cards_updated`, `edges_updated`, `duration_ms` |
 | `doctor` | `surf.doctor/1` | §4.11 |
 | `init` | `surf.init/1` | `plan`, `installed: [InstalledItem]`, `warnings`, `smoke: [{prompt, status, latency_ms}]` |
@@ -606,7 +606,7 @@ class RouteOutput(BaseModel):
 | Path | Budget (p50 / p95, warm disk) |
 |---|---|
 | `surf-hook prompt` fast exits (no project, disabled, control command, ack skip) | ≤ 60 ms / 100 ms wall, stdlib + `tomllib` only |
-| `surf-hook prompt` import overhead before routing (pydantic, httpx, sqlite3, surf core; no typer/rich/mcp) | ≤ 200 ms / 300 ms |
+| `surf-hook prompt` import overhead before routing (pydantic, httpx + h2, sqlite3, surf core; no typer/rich/mcp) | ≤ 200 ms / 300 ms (httpx ~80–95 ms, h2 ~14 ms, pydantic ~24 ms measured 2026-09-24) |
 | `surf-hook session-start` | ≤ 150 ms when fresh; ≤ `session_start_wait_ms` + 50 ms when stale (06) |
 | `surf route` CLI overhead over engine (typer import) | ≤ 250 ms |
 | MCP tool-call overhead over engine | ≤ 10 ms |

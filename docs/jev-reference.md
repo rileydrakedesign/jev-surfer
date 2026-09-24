@@ -44,7 +44,7 @@ Jev is a "System One" model: it takes a `state` and a map of typed questions and
 | Base URL env var (SDK only) | `TYPESAFE_BASE_URL` (default `https://api.typesafe.ai`) | SDK constants |
 | Model listing | `GET https://api.typesafe.ai/v1/models` → `{"models": [{"name", "description", "release_date"}]}`; lists aliases; versioned ids are accepted even if unlisted | Models |
 | Request id | `x-typesafe-request-id` response header (observed: `req_…`) | SDK exceptions (`request_id`), probe |
-| Transport | HTTP/2 negotiated via ALPN; served by Envoy (`server: istio-envoy`) | Probe 2026-09-24 |
+| Transport | HTTP/2 negotiated via ALPN; served by Envoy (`server: istio-envoy`). surf uses it: one connection per route (07 D-07-12) | Probe 2026-09-24 |
 
 ## 3. Request body
 
@@ -138,10 +138,10 @@ The SDK adds what the API page doesn't list: 400, 403, 404 and generic 5xx excep
 | Limit | `jev-1.13` value | surf setting | Source |
 |---|---|---|---|
 | Context | 64k tokens per request (state + all questions); 32k for state + the longest single question | `judge.max_request_tokens` 8,000 (accuracy, not capacity) | Models |
-| Questions per request | No documented limit | 40 (spec principle 5) | API, Primitives |
+| Questions per request | No documented limit | Per backend (07 §4.2): `jev` 500 questions / 30k estimated tokens per request (spec D15) | API, Primitives |
 | Choice options | 255 | 3 | API, Choice |
 | Score levels | 2–10 | – | API |
-| Rate limits | 250,000 tokens/s and 1,200 requests/min, "adjusting dynamically … can change without notice"; over either → 429 | `judge.max_concurrency` 8 (D-07-8) | Models |
+| Rate limits | 250,000 tokens/s and 1,200 requests/min, "adjusting dynamically … can change without notice"; over either → 429 | `judge.max_concurrency` 8 (D-07-8); `router.flat_max_tokens` 40k per route (spec D14) | Models |
 | Concurrency | Not documented. Cookbooks use 6–8 workers: "the public endpoint rate-limits above roughly eight" (Entity alignment) | 8 | Cookbooks |
 | Input | Text only (string, JSON object, array of text) | strings only | Models, State |
 | Language | "English is the primary training language and where accuracy is currently best"; others, incl. CJK, "handled but not equally well" | Q-09-12 | Models |
@@ -234,14 +234,14 @@ All checked 2026-09-23. Every provider below uses the native envelope of §3–4
 |---|---|---|---|---|---|---|
 | TypeSafe | `https://api.typesafe.ai/v1/systemone` | `jev-1.13.0` | exact | `jev-1.13.0` | Early access with a waitlist at launch (blog, 2026-09-15) | Models; https://typesafe.ai/blog/introducing-system-one-models-and-jev |
 | OpenRouter | `https://openrouter.ai/api/v1/systemone` | `typesafe/jev-1.13` (`~typesafe/jev-latest` for the alias) | minor version, dated snapshot | `typesafe/jev-1.13-20260917` | "no waitlist or separate TypeSafe account"; not in the default chat-only `/api/v1/models` list (use `?output_modalities=all`); extra `id`, `provider`, `usage.cost`; errors `{"error":{"code","message"}}`, adds 402; 32k context listed; data policy `training: false, retainsPrompts: false`. An alpha `/api/alpha/decisions` surface exists (used by some prior art); don't use it | https://openrouter.ai/docs/guides/community/typesafe-sdk |
-| Vercel AI Gateway | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | none | `typesafe-ai/jev` | AI Gateway key or OIDC token; "The response uses TypeSafe's field names"; errors `{message, error_type}`; `zdr: all`; free until 2026-09-25. Its separate `/v1/evaluate` API renames Noul to `boolean`; don't use it | https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe |
+| Vercel AI Gateway (deferred from v1, 07 D-07-10) | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | none | `typesafe-ai/jev` | AI Gateway key or OIDC token; "The response uses TypeSafe's field names"; errors `{message, error_type}`; `zdr: all`; free until 2026-09-25. Its separate `/v1/evaluate` API renames Noul to `boolean`; don't use it | https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe |
 | Cloudflare | Workers AI `POST https://api.cloudflare.com/client/v4/accounts/{id}/ai/run`, body `{"model":"typesafe/jev","input":{state, questions}}` | `typesafe/jev` | none | `jev-1.13.0` (example) | Not an AI Gateway provider; different envelope. Dropped from v1 (07 D-07-9) | https://developers.cloudflare.com/ai/models/typesafe/jev/ |
 
 Local open reproductions ("independent efforts, not official TypeSafe releases", awesome-jev list) expose the same `/v1/systemone` path. Reference for surf: **Laya** (`pip install "laya[serve]"`, `laya-serve`, `127.0.0.1:8321`, Apache-2.0 code and weights, CPU, "degrades past about 20 options"). Others: LitJev (Apache-2.0 code, Qwen weights, "Probabilities are not calibrated by default"), kev (Apache-2.0), ruling (MIT, Apple MLX), open-jev (Gemma weights, non-Apache terms), openjev-sglang (no LICENSE). There are no published Jev weights.
 
 **SDK decision (07 D-07-2, Q-07-1 resolved):** `typesafe-sdk` 0.7.1 (MIT, Python ≥ 3.10, first public release 2026-09-14) is async and works with OpenRouter and Vercel through `base_url`, but its path is hardcoded to `/v1/systemone`, it depends on `httpx2` (not httpx), `import typesafe_sdk` measured ~243 ms vs ~129 ms for httpx + pydantic, it has had two breaking minor releases, and debug logging writes request bodies unredacted. surf keeps httpx at runtime and uses the SDK only in the conformance test. If it is ever used at runtime, pass `RetryPolicy(max_retries=0)` so 07's retry and breaker logic governs.
 
-**Prior art (spec §4), licenses checked 2026-09-23:** MIT: jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router, jev-skillful. No LICENSE: jev-router, blink, jev-knowledge-base (spec §4 lists only jev-router as unlicensed; see `open-questions.md` Q-07-9). All of them use the field names in §3–4. Useful practice: jev-codex-router caps at 40 questions per request; jev-skillful retries {429, 502, 503, 504, 529}; one project defaults a missing answer to `noul = 0.0`, which surf must not do (07 §4.3 treats it as missing).
+**Prior art (spec §4), licenses checked 2026-09-23:** MIT: jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router, jev-skillful. No LICENSE: jev-router, blink, jev-knowledge-base (spec §4 updated 2026-09-24). All of them use the field names in §3–4. Useful practice: jev-codex-router caps at 40 questions per request; jev-skillful retries {429, 502, 503, 504, 529}; one project defaults a missing answer to `noul = 0.0`, which surf must not do (07 §4.3 treats it as missing).
 
 ## 15. Still unverified: Phase 0 live checks
 

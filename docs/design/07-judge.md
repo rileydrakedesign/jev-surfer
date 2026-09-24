@@ -13,9 +13,9 @@ The judge is the only component that talks to a model. The router (09) speaks on
 
 **In scope (v1)**
 - Async protocol with a sync facade; typed questions/answers; per-request outcomes for batches.
-- Backends: `jev` (providers `typesafe`, `openrouter`, `vercel`), `systemone-local`, `llm` (eval baseline), `null`, `fixture` (record/replay).
+- Backends: `jev` (providers `typesafe`, `openrouter`; D-07-9, D-07-10), `systemone-local`, `llm` (eval baseline), `null`, `fixture` (record/replay).
 - Resilience: per-request timeout clipped to the route deadline, retry-once, concurrency semaphore, circuit breaker persisted across processes.
-- Question batching limits (≤ 40 questions per request, balanced auto-split).
+- Per-backend request limits (`RequestLimits`: questions and estimated tokens per request) and token-balanced auto-split.
 - Token and cost accounting per route.
 - Threshold-profile lookup (which `router.thresholds.<profile>` table applies).
 
@@ -28,7 +28,7 @@ The judge is the only component that talks to a model. The router (09) speaks on
 
 ### 2.1 Why async (decision)
 
-The router needs real parallelism in three places: walk levels fan out to N chunk requests (`ask_many`), walk level 1 runs **speculatively alongside call 1** and must be **cancellable** when call 1 says `same`, and call 1 itself splits into parallel chunks in small-repo mode. Options considered:
+The router needs real parallelism in three places: the flat pass and walk levels fan out to N requests (`ask_many`); the flat pass or walk level 1 runs **speculatively alongside call 1** and must be **cancellable** when call 1 says `same`; and call 1 itself splits into parallel chunks when it exceeds the backend's request limits. Options considered:
 
 | Option | Parallelism | Cancellation of in-flight requests | Deadline enforcement | Fit |
 |---|---|---|---|---|
@@ -113,6 +113,7 @@ class Judge(Protocol):
     provider: str | None
     model: str
     threshold_profile: str | None           # §4.9; None for null
+    limits: RequestLimits                   # §4.2; per backend, config-overridable
 
     def availability(self) -> Availability: ...           # cheap, no network; reads breaker file
     async def ask(self, req: JudgeRequest, *, ctx: CallCtx) -> JudgeResponse: ...   # raises JudgeError
@@ -155,7 +156,7 @@ All knowledge of the Jev/System One HTTP format is in **`judge/jev_wire.py`**, u
 ```python
 @dataclass(frozen=True)
 class ProviderSpec:
-    name: str                    # typesafe | openrouter | vercel | local
+    name: str                    # typesafe | openrouter | local
     base_url: str
     path: str
     auth_headers: Callable[[Mapping[str, str]], dict[str, str]]   # env -> headers
@@ -169,7 +170,7 @@ def encode(req: JudgeRequest, *, model: str, spec: ProviderSpec) -> tuple[bytes,
 def decode(body: bytes, *, keymap: KeyMap, req: JudgeRequest, spec: ProviderSpec) -> RawResult: ...
 ```
 
-**Key mapping.** Caller keys contain `:` and arbitrary path characters (`w:code:src/api/orders/[id].ts`). The wire uses opaque keys `q000`…`q039` in request order and `KeyMap` maps back. The API documents question ids as free-form keys that are "not sent to the underlying model and not used in inference", but not their grammar or length, so opaque keys stay. Choice **option** keys are different: the model sees them with their descriptions, so they stay readable (`same`/`extends`/`new`).
+**Key mapping.** Caller keys contain `:` and arbitrary path characters (`w:code:src/api/orders/[id].ts`). The wire uses opaque keys `q000`, `q001`, … (zero-padded to 3 digits, 4 above 999) in request order and `KeyMap` maps back. The API documents question ids as free-form keys that are "not sent to the underlying model and not used in inference", but not their grammar or length, so opaque keys stay. Choice **option** keys are different: the model sees them with their descriptions, so they stay readable (`same`/`extends`/`new`).
 
 **Native envelope (verified 2026-09-23 against the TypeSafe API reference; see [`../jev-reference.md`](../jev-reference.md) §3–4).** Request:
 
@@ -208,14 +209,14 @@ Every supported provider speaks the native System One envelope (§3.1), so there
 |---|---|---|---|---|---|---|---|
 | `typesafe` | `https://api.typesafe.ai` + `/v1/systemone` | `Authorization: Bearer $KEY` | `TYPESAFE_API_KEY` | `jev-1.13.0` | exact version | `jev-1.13.0` | JSON, status per 07 §4.6 |
 | `openrouter` | `https://openrouter.ai/api` + `/v1/systemone` | `Authorization: Bearer $KEY` | `OPENROUTER_API_KEY` | `typesafe/jev-1.13` | minor version (dated snapshot) | `typesafe/jev-1.13-20260917` | `{"error": {"code", "message"}}`; adds 402 (insufficient credits) |
-| `vercel` | `https://ai-gateway.vercel.sh/typesafe` + `/v1/systemone` | `Authorization: Bearer $KEY` (AI Gateway key or Vercel OIDC token) | `AI_GATEWAY_API_KEY` | `typesafe-ai/jev` | **none** (single unversioned id) | `typesafe-ai/jev` | `{"message", "error_type"}`; provider errors passed through |
 | `local` (`systemone-local`) | `judge.local.base_url` + `/v1/systemone` | optional Bearer | `SYSTEMONE_LOCAL_API_KEY` (optional) | `judge.model` | – | implementation-defined | implementation-defined |
 
 - `ProviderSpec.model_id` maps the pinned id to the provider string above; `ProviderSpec.normalize_model` maps the echoed string back to a comparable id (`typesafe/jev-1.13-20260917` → `jev-1.13`), used for the §4.3 model check at the provider's pin granularity. Decision records keep both the provider and the raw echoed value (15).
-- Extra response fields (`id`, `provider`, `usage.cost` on OpenRouter; `provider_metadata` on Vercel) are ignored; cost is always computed from `usage.input_tokens` (§4.8).
+- Extra response fields (`id`, `provider`, `usage.cost` on OpenRouter) are ignored; cost is always computed from `usage.input_tokens` (§4.8).
 - OpenRouter 402 → `AUTH` kind (not retried; breaker opens for `auth_cooldown_s`; `surf doctor` says "check credits").
 - **Eval runs require `provider = "typesafe"`** (16): only TypeSafe direct pins `jev-1.13.0` exactly. `surf doctor` warns when the configured provider can't honor the pin.
 - `local`: Laya (`pip install "laya[serve]"`, `laya-serve`, default `http://127.0.0.1:8321/v1/systemone`, Apache-2.0 code and weights, CPU) is the reference open reproduction for A7. Reproductions are community projects, not TypeSafe releases; calibration differs and several degrade on large Choices (Laya "past about 20 options"), which v1 doesn't ask.
+- **Vercel AI Gateway is deferred** (D-07-10): it serves Jev natively at `https://ai-gateway.vercel.sh/typesafe/v1/systemone` (key `AI_GATEWAY_API_KEY`), but only as the unversioned `typesafe-ai/jev`, so thresholds can't be tied to a version and a silent upgrade can't be detected. Add it as a `ProviderSpec` when it exposes versioned ids.
 - **Cloudflare is not a v1 provider** (D-07-9). Cloudflare AI Gateway has no TypeSafe provider; Jev is reachable only as the Workers AI third-party model `typesafe/jev` via `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run` with a different envelope (`{"model", "input": {state, questions}}`) and no version pin, or through a user-registered custom provider. Either can be added later as a new codec in `jev_wire.py` with its own config keys.
 
 Escape hatches (13-config): `judge.base_url`, `judge.path`.
@@ -287,8 +288,8 @@ Format agreed with 16-evaluation §3.7 (07 owns it). One file per (repo, split, 
 ask(req, ctx):
   1. assert req.redacted (network backends)                       -> ValueError (programming error)
   2. a = availability(); if not a.ok -> raise JudgeError(a.reason) (no network, no ledger failure count)
-  3. if len(req.questions) > max_questions_per_request
-        or est_tokens(req) > max_request_tokens:
+  3. if len(req.questions) > limits.max_questions
+        or est_tokens(req) > limits.max_tokens:
         return merge(await ask_many(split(req), ctx))              # §4.2; partial -> missing keys
   4. async with semaphore (acquire bounded by ctx.deadline)        # §4.4
   5. t = request_timeout(ctx)                                      # §4.5; t < min_request_ms -> DEADLINE
@@ -299,12 +300,21 @@ ask(req, ctx):
 
 `ask_many(reqs, ctx)`: `asyncio.gather(*(self._ask_one(r, ctx) for r in reqs), return_exceptions=True)` where `_ask_one` converts `JudgeError` into a returned value; `CancelledError` propagates (the caller cancelled the whole batch). Results are in input order. Breaker bookkeeping is done **once per `ask_many` batch** (§4.7).
 
-### 4.2 Question batching limits
+### 4.2 Request limits and splitting
 
-- Hard cap `judge.max_questions_per_request` = 40 (spec §2 principle 5). This is surf's own cap: the API documents no per-request question limit, only the context budget below. Router `chunk_size` must be ≤ this (13 validates).
-- Token cap `judge.max_request_tokens` = 8,000 (estimated, §4.8). With cards ≤ 150 tokens and state ≤ ~2,000 tokens, 40 dir cards fit; the cap exists to catch pathological state. It sits far below the documented `jev-1.13` context limits (64k tokens for state plus all questions; 32k for state plus the longest single question), on purpose: the jaggedness notes say accuracy falls as irrelevant state grows.
-- `split(req)`: `k = ceil(n / cap)` balanced chunks (sizes differ by ≤ 1; 41 → 21 + 20, never 40 + 1), preserving question order. **Choice questions are always in chunk 0.** Every chunk repeats the full `state`. Each question is asked exactly once.
-- If a single question plus state exceeds `max_request_tokens` → `TOO_LARGE`, not sent (the router truncates state first, so this indicates a bug or a giant card).
+Accuracy risk lives in the **state** (jaggedness #5), and questions are judged independently against it (`docs/jev-reference.md` §9), so limits bound request size and backend capacity, not accuracy (spec principle 5, D15). The router keeps state ≤ ~2k tokens (09 §3.2). Each backend exposes `limits: RequestLimits(max_questions, max_tokens)` (D-07-11):
+
+| Backend | `max_questions` | `max_tokens` (estimated) | Why |
+|---|---|---|---|
+| `jev` | 500 | 30,000 | Fits OpenRouter's 32k context and TypeSafe's 64k (32k for state + longest question); 500 is a sanity bound, not an accuracy limit |
+| `systemone-local` | 64 | 8,000 | Reproductions cap requests (openjev-sglang: 64 questions) and run on small hardware |
+| `llm` | 40 | 8,000 | One chat completion answers every item; long item lists degrade generative models |
+| `fixture`, `null` | inherit the recorded / configured backend | | |
+
+`judge.max_questions_per_request` and `judge.max_request_tokens` override the backend defaults (13).
+
+- `split(req)`: `k = max(ceil(n / max_questions), ceil(est_tokens / max_tokens))` chunks, token-balanced (greedy in question order, then rebalanced so chunk sizes differ by at most one question's tokens), preserving question order. **Choice questions are always in chunk 0.** Every chunk repeats the full `state`. Each question is asked exactly once.
+- If a single question plus state exceeds `max_tokens` → `TOO_LARGE`, not sent (the router truncates state first, so this indicates a bug or a giant card).
 - `merge`: answers union; keys from failed chunks go to `missing`; the merged response is `outcome="partial"` if any chunk failed, and `JudgeError` only if all failed.
 
 The router pre-chunks explicitly (it needs chunk-level trace entries), so auto-split is a safety net, not the primary mechanism.
@@ -328,9 +338,9 @@ The router pre-chunks explicitly (it needs chunk-level trace entries), so auto-s
 ### 4.4 Concurrency
 
 - One `asyncio.Semaphore(judge.max_concurrency)` (default 8, D-07-8) per `Judge` instance, i.e. per process. It is not coordinated across processes (two Claude Code sessions can each run 8); documented, not solved in v1.
-- Why 8: the published `jev-1.13` limits are 1,200 requests per minute and 250,000 tokens per second per account, "adjusting dynamically", with no documented concurrency limit. TypeSafe's own cookbooks run 6–8 workers, one noting "the public endpoint rate-limits above roughly eight". A route sends a few to ~20 requests (the widest walk level has ≤ `max_frontier` 12 nodes, 09 §4.8), so RPM is not the constraint for one user; burst concurrency is. At the documented ~100 ms per request, queueing beyond 8 adds about one round trip, and only on the widest levels (09 §4.14). Phase 0 measures the 429 share at 8 and 16 (§8.4).
+- Why 8: the published `jev-1.13` limits are 1,200 requests per minute and 250,000 tokens per second per account, "adjusting dynamically", with no documented concurrency limit. TypeSafe's own cookbooks run 6–8 workers, one noting "the public endpoint rate-limits above roughly eight". A route sends a few to ~20 requests (the widest walk level has ≤ `max_frontier` 12 nodes, 09 §4.9), so RPM is not the constraint for one user; burst concurrency is. At the documented ~100 ms per request, queueing beyond 8 adds about one round trip, and only on the widest levels (09 §4.15). Phase 0 measures the 429 share at 8 and 16 (§8.4).
 - Acquisition is bounded: `asyncio.timeout(ctx.deadline.remaining_ms() - min_request_ms)`; timing out → `DEADLINE` (not counted by the breaker).
-- One `httpx.AsyncClient` per Judge with `Limits(max_connections=max_concurrency, max_keepalive_connections=max_concurrency)`, HTTP/1.1. HTTP/2 would need the `h2` extra (Q-07-3).
+- One `httpx.AsyncClient(http2=judge.http2)` per Judge with `Limits(max_connections=max_concurrency, max_keepalive_connections=max_concurrency)`. `api.typesafe.ai` negotiates HTTP/2, so all requests of a route share one connection and one TLS handshake (0.2–0.3 s cold) instead of up to 8. Dependency `httpx[http2]`; importing `h2` adds ~14 ms (measured 2026-09-24, Python 3.11), inside 12 §7's budget. Servers without HTTP/2 fall back to HTTP/1.1 through ALPN (D-07-12).
 - Cancellation (speculative walk discard): the task is cancelled, httpx closes the connection, the semaphore slot is released in `finally`, and the ledger records `outcome="cancelled"` with the estimated tokens of the body already sent.
 
 ### 4.5 Timeouts
@@ -461,13 +471,14 @@ Owned by 13-config; consumed here.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `judge.backend` | enum | `"jev"` | `jev` \| `systemone-local` \| `llm` \| `null` \| `fixture` |
-| `judge.provider` | enum | `"typesafe"` | `typesafe` \| `openrouter` \| `vercel` (D-07-9: no `cloudflare`) |
+| `judge.provider` | enum | `"typesafe"` | `typesafe` \| `openrouter` (D-07-9: no `cloudflare`; D-07-10: `vercel` deferred) |
 | `judge.model` | str | `"jev-1.13.0"` | pinned |
 | `judge.timeout_ms` | int | 1200 | per attempt; backend-specific defaults for `llm` (20000), `systemone-local` (3000) |
 | `judge.min_request_ms` | int | 150 | don't start/retry below this remaining budget |
 | `judge.max_concurrency` | int | 8 | per process (D-07-8) |
-| `judge.max_questions_per_request` | int | 40 | hard cap; `router.chunk_size` ≤ this |
-| `judge.max_request_tokens` | int | 8000 | estimated |
+| `judge.max_questions_per_request` | int? | None → backend default (§4.2) | `router.chunk_size` ≤ the effective value |
+| `judge.max_request_tokens` | int? | None → backend default (§4.2) | estimated tokens |
+| `judge.http2` | bool | true | HTTP/2 via `h2` (§4.4, D-07-12) |
 | `judge.retry` | bool | true | retry-once policy |
 | `judge.breaker.failures` | int | 3 | consecutive failed batches |
 | `judge.breaker.cooldown_s` | int | 60 | |
@@ -522,9 +533,9 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 
 | Item | Budget |
 |---|---|
-| `make_judge` (import httpx + build client, no network) | ≤ 60 ms (httpx import dominates; lazy-import `h2`/SDK never) |
+| `make_judge` (import httpx + h2 + build client, no network) | ≤ 100 ms (httpx ~80–95 ms and h2 ~14 ms measured; the SDK is never imported) |
 | `availability()` | ≤ 1 ms (stat + small JSON read) |
-| Encode + decode per request (40 questions) | ≤ 2 ms |
+| Encode + decode per request (500 questions) | ≤ 10 ms |
 | Breaker write | ≤ 2 ms, at most once per route, only on state change |
 | Overhead per `ask` excluding network | ≤ 5 ms |
 | Fixture replay per request | ≤ 0.5 ms after store load |
@@ -538,11 +549,12 @@ Keys come only from env (spec §16); names per §3.2. `make_judge` is the only f
 
 | Area | Cases |
 |---|---|
-| Split | 40 → 1 chunk; 41 → 21/20; 81 → 27/27/27; Choice always chunk 0; state repeated; order preserved; `TOO_LARGE` for one huge question |
+| Split | by question cap (`systemone-local` 65 → 33/32) and by tokens (`jev` 45k estimated → two ~22.5k chunks); Choice always chunk 0; state repeated; order preserved; `TOO_LARGE` for one huge question |
 | Validation | every row of §4.3 |
 | Retry | table in §4.6: each status × remaining-deadline combination; jitter deterministic with seeded route id |
 | Timeout | slow mock (sleep) vs `timeout_ms`; clipped by deadline; `min_request_ms` refusal |
-| Semaphore | 40 concurrent asks with limit 16 → max 16 in flight (instrumented transport) |
+| Semaphore | 40 concurrent asks with limit 8 → max 8 in flight (instrumented transport) |
+| HTTP/2 | parallel requests share one connection (instrumented transport counts handshakes); `judge.http2 = false` uses HTTP/1.1 |
 | Cancellation | cancel `ask_many` mid-flight → slots free within 10 ms, ledger `cancelled` |
 | Breaker | 3 failed batches → open; batch of 6 timeouts counts once; success resets; half-open success/failure; AUTH opens 600 s; two `Breaker` instances on one file (simulated processes) see each other's state; corrupt file |
 | Key map | caller keys with `:`, `[`, spaces, unicode round-trip |
@@ -600,6 +612,9 @@ The documented format is already transcribed in §3.1 (verified against the docs
 | D-07-7 | `null` "returns no decision" | `null` is *unavailable*; router status `judge-unavailable` with reason `null-backend` | One code path for "no judge"; nothing to interpret |
 | D-07-8 | "Concurrency limit: 16 in-flight requests" (§13.3) | Default `judge.max_concurrency` = 8 | TypeSafe documents RPM/TPS limits that change "without notice" and no concurrency limit; its cookbooks cap at 6–8 workers because "the public endpoint rate-limits above roughly eight". Phase 0 measures 8 vs 16 (§8.4) |
 | D-07-9 | Providers include Cloudflare AI Gateway (§13.2) | No `cloudflare` provider in v1; `judge.cloudflare.*` keys removed | Cloudflare AI Gateway has no TypeSafe provider. Jev is only on Workers AI (`/ai/run`, a different envelope, no version pin) or via a user-defined custom provider. Can return later as its own codec |
+| D-07-10 | Providers include Vercel AI Gateway (§13.2) | Deferred from v1 (spec D17) | Only an unversioned model id: thresholds can't be pinned and upgrades can't be detected |
+| D-07-11 | ≤ 40 questions per request (§2 principle 5) | Per-backend `RequestLimits`: `jev` 500 questions / 30k tokens, `systemone-local` 64 / 8k, `llm` 40 / 8k (spec D15) | Questions are judged independently; the state, kept small by 09, is what affects accuracy |
+| D-07-12 | HTTP/1.1 (implicit) | HTTP/2 via `httpx[http2]`, one connection per route (spec D18) | Saves up to 7 TLS handshakes per cold route; ~14 ms import |
 
 ### Open questions
 
@@ -607,12 +622,12 @@ The documented format is already transcribed in §3.1 (verified against the docs
 |---|---|---|---|
 | Q-07-1 | Use the official SDK at runtime? | No (D-07-2) | Resolved 2026-09-23 by SDK inspection (D-07-2 evidence); revisit if its import cost drops and it reaches 1.0 |
 | Q-07-2 | Are Jev answers independent of co-batched questions? If not, per-question fixtures drift from live | Independent (documented: "Every answer is independent. One question's answer is not hidden context for another. You can add or remove questions without changing the others' results.") | Narrowed to a Phase 0 sanity check: same question in two batches ×20, compared against the same-batch run-to-run spread (SD ≈ 0.01 per the docs); disable the question-level fallback only if the cross-batch gap clearly exceeds that noise |
-| Q-07-3 | HTTP/2 multiplexing (adds `h2`) | Adopt if the `h2` import fits the hook budget (12 §7): `api.typesafe.ai` negotiates HTTP/2 (Envoy; probe 2026-09-24), and TCP + TLS is 0.21–0.32 s of a ~0.75 s route in jev-skillful's measurements, so one shared connection per route matters | Conformance latency test: HTTP/1.1 vs HTTP/2, cold |
+| Q-07-3 | HTTP/2 multiplexing (adds `h2`) | Resolved 2026-09-24: adopted (D-07-12). The origin negotiates HTTP/2 and `h2` adds ~14 ms import | Phase 0 still measures cold HTTP/1.1 vs HTTP/2 latency |
 | Q-07-4 | Escalating breaker cooldown (60 → 120 → 300 s) on repeated opens | Fixed 60 s | Production decision logs: flapping rate |
 | Q-07-5 | Production answer cache (e.g. repeated walk level 1 for the same request in a session) | None in v1 | Latency data on `extends` routes |
 | Q-07-6 | Exact wire format, gateway model ids, Cloudflare path, and whether OpenRouter/Vercel need a chat envelope | Resolved 2026-09-23 from the TypeSafe, OpenRouter and Vercel docs: §3.1–3.2 (all native; Cloudflare dropped, D-07-9) | Phase 0 still checks: whether OpenRouter accepts `jev-1.13.0`, and whether probabilities match TypeSafe direct on a fixed request |
 | Q-07-7 | Cross-process concurrency cap (several sessions × 8) | None | Rate-limit errors (429 share) in decision logs. Limits are per account (1,200 RPM, 250k TPS for `jev-1.13`), so several sessions share one budget |
 | Q-07-8 | Send structured `instructions` (card as a named field, question text referring to it and to `request` by backticked path), as TypeSafe recommends for questions that carry data? | No in v1: `NoulQ.instructions` stays `str` | Wording experiment (16 Q-16-9). If adopted, `instructions: str \| dict[str, str]` in §2.2 and fixture keys change |
 | Q-07-9 | Spec §4 lists only jev-router as unlicensed; blink and jev-knowledge-base have no LICENSE either (shallow clones, 2026-09-23). MIT: jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router, jev-skillful | Update spec §4; copy nothing from the unlicensed three | Owner (spec edit) |
-| Q-07-10 | Vercel serves only unversioned `typesafe-ai/jev`, so thresholds can't be tied to a version and silent upgrades are undetectable | Defer `vercel` from v1 (keep `typesafe`, `openrouter`); if kept, always `uncalibrated` | Owner |
-| Q-07-11 | Question and token caps differ per backend (openjev-sglang rejects > 64 questions; CPU reproductions ~0.8 s per request) | Per-backend defaults: `jev` bounded by tokens (≤ 30k per request, OpenRouter's 32k context), `systemone-local` 64 questions | Design review, with Q-09-13 |
+| Q-07-10 | Vercel serves only unversioned `typesafe-ai/jev` | Resolved 2026-09-24: deferred (D-07-10, spec D17) | – |
+| Q-07-11 | Question and token caps differ per backend | Resolved 2026-09-24: `RequestLimits` per backend (§4.2, D-07-11) | – |

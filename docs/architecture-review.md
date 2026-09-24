@@ -2,7 +2,19 @@
 
 **Date:** 2026-09-24. **Inputs:** [`jev-reference.md`](jev-reference.md) (verified docs), [`jev-docs-checks.md`](jev-docs-checks.md) §3, prior-art source (8 repos, cloned 2026-09-23), and keyless probes of `api.typesafe.ai`.
 **Question:** now that Jev's behavior is documented, does each architecture decision still earn its keep?
-**Status:** proposals only. Nothing here changes the spec or a shipped default. Each proposal is registered in `open-questions.md` and decided by the owner or by the dev-set eval (spec §17), per the non-negotiables.
+**Status:** applied 2026-09-24 at the owner's request. Starting values are still confirmed by the dev-set eval (spec §17) before release.
+
+| Finding | Applied as |
+|---|---|
+| §3.1 flat-first, principle 5 | Spec D14, D15 (§2, §11, §16, §17.5, §20); 09 §4.5, §4.8, D-09-22; 05 `flat_cards()`/`flat_card_tokens()`; 13 `router.flat_max_tokens`, `router.mode = walk`; 16 A4w, D-16-13. `flat_max_tokens` = 40,000 is set by A0 vs A4w (Phase 2 exit) |
+| §3.2 latency | Spec D18, §11.9; 07 D-07-12 (HTTP/2; `h2` import ~14 ms measured). Warm path stays a Phase 0 measurement (12 Q-12-9) |
+| §3.3 gate | Flat mode: content answers are the gate (09 §4.6). Walk mode: open (Q-09-14) |
+| §3.4 speculation | Kept separate requests in the same wave (spec D16); `task.cancel()` kept, since it costs nothing and the route returns immediately anyway. The review's "drop cancellation" overstated the saving |
+| §3.5 TPS | Token budget per route (spec D14); 13 warns above 100k |
+| §3.6 providers | Spec D17; 07 D-07-10 (Vercel deferred) |
+| §3.7 per-backend caps | Spec D15; 07 §4.2, D-07-11 |
+| §3.8 note wording | Candidates in 11 Q-11-4 (eval decides) |
+| Also | Spec D19 (concurrency 8), D20 (final pass one request), §4 licenses, §22.1 client, §20 jaggedness rows |
 
 ---
 

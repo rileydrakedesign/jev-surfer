@@ -135,7 +135,7 @@ Jev Surfer is a tool you point at an existing ("brownfield") project. It:
 2. **Jev decides, code enforces.** Jev only makes bounded, typed judgments. Code owns thresholds, graph expansion, budgets, lease logic and fallbacks.
 3. **Recall early, precision late.** Upper levels of the walk use lenient thresholds and wide beams. The final pass is strict.
 4. **Pointers, not payloads.** The note tells the agent where to look. It never pastes file contents in v1.
-5. **Never send Jev the whole index.** Every Jev request holds ≤ ~40 candidates, plus a small amount of context.
+5. **Keep Jev's state small and every call bounded.** State carries only the redacted prompt and a few context fields (≈ 2k tokens at most). Candidates go in questions, which Jev judges independently against that state, so what degrades accuracy (large, irrelevant state) never grows with the number of candidates. Every request stays within the backend's size limits and every route within a token budget (§11.5): the index is judged file by file only when it's small enough, and walked otherwise. (Revised 2026-09-24, D15.)
 6. **Fail open.** Any error, timeout or low-confidence outcome means the agent runs exactly as it would without `surf`.
 7. **Harness-neutral core.** The engine knows nothing about specific agents. Adapters are thin and optional.
 8. **Measured, not claimed.** No threshold, wording or feature ships without an evaluation result behind it.
@@ -150,10 +150,10 @@ Each decision includes the evaluation signal that would reopen it.
 |---|---|---|---|
 | D1 | No LLM summaries in v1 | Lossy, costly, drift-prone, injectable. Generic summaries act as distractors. Docs, skills, MCP tools and tables already describe themselves. | Evaluation misses concentrate under generic-name directories (`lib/`, `common/`, `utils/`) |
 | D2 | No BM25 or embeddings in v1 | Users rarely type exact identifiers. Vocabulary mismatch is common in brownfield code. It would be another ranker to tune. | New-task p50 latency > 1.5 s from walk depth, or root-level misses on natural-language queries |
-| D3 | Jev directory walk as the candidate generator | Jev handles natural language. Parallel per level. Flattening keeps depth to 1–2 levels. | Layered-architecture recall stays below target after tuning |
+| D3 | Jev directory walk as the candidate generator **for indexes above the flat budget** (narrowed by D14) | Jev handles natural language. Parallel per level. Flattening keeps depth to 1–2 levels. | Layered-architecture recall stays below target after tuning |
 | D4 | Path matching on prompt text | Stack traces and error output carry exact paths. It's a pure string match against stored paths. | Never; it's nearly free |
 | D5 | Capability surfaces are never filtered | Small, flat sets. Capabilities rarely match prompt vocabulary. | A user has so many capabilities that call 1 exceeds latency targets |
-| D6 | Skip the walk for small repos (≤ 60 content cards) | One or two calls cover everything. The walk adds latency without adding recall. | Evaluation shows the flat approach loses precision near the cutoff |
+| D6 | ~~Skip the walk for small repos (≤ 60 content cards)~~ Superseded by D14 | One or two calls cover everything. The walk adds latency without adding recall. | – |
 | D7 | Edges: containment, co-change, schema references | All effectively language-agnostic. Co-change bridges layered architectures. | Misses where an anchor was found but a related file with no co-change history was not |
 | D8 | Code-symbol references deferred to v1.1 | Needs tree-sitter or ctags configuration. Cards work without symbols to start. | See D7; also if file cards prove too thin |
 | D9 | Model tiers deferred to v2 | Separate problem. Weak enforcement in most harnesses. Couples routing to model-switching behavior. | v1 is stable and users ask for it |
@@ -161,12 +161,19 @@ Each decision includes the evaluation signal that would reopen it.
 | D11 | Ground-up build | Index and graph are the product. Harness-neutral requirement. Licensing uncertainty on jev-router. | n/a |
 | D12 | Evaluation in Phase 0 | Thresholds, wording and v2 gates all need it. Question wording can swing results dramatically. | n/a |
 | D13 | Judge interface abstracts Jev | Vendor independence, local fallback, LLM baseline for evaluation | n/a |
+| D14 | **Flat-first routing** (2026-09-24): when the index's flat pass fits `router.flat_max_tokens` (40k), judge every leaf card directly with the strict wording, in the same wave as call 1; walk only above the budget | Jev judges questions independently against the state, so many candidates don't degrade each one (docs: Models, Primitives). Directory questions are indirection, a documented weakness. One round trip instead of 2–4; a 450-card flat pass is ~$0.002 | Flat (A0) loses precision against walk (A4w) under the budget on dev, or the 429 share rises with flat routes |
+| D15 | Principle 5 bounds state and tokens, not question count (2026-09-24) | The 40-question cap limited nothing the jaggedness notes warn about; the account-wide token rate (250k tokens/s) is the real limit | TypeSafe documents question-count effects |
+| D16 | Flat and walk requests keep their own state and never share call 1's (2026-09-24) | `previous_task` is irrelevant state for content judgments on new tasks | Eval shows content recall improves with continuity context (Q-09-1) |
+| D17 | Providers: TypeSafe direct and OpenRouter; Cloudflare dropped, Vercel deferred (2026-09-24) | All speak the native API; only TypeSafe pins `jev-1.13.0` exactly, OpenRouter pins the minor version and has no waitlist; Vercel has no versioned id; Cloudflare's AI Gateway has no TypeSafe provider | Vercel exposes versioned ids; Cloudflare adds a TypeSafe gateway provider |
+| D18 | Runtime judge client is httpx (async, HTTP/2); `typesafe-sdk` is a dev-only cross-check (2026-09-24) | One codec for every provider; `typesafe-sdk` 0.7.1 adds ~115 ms import time per hook process, a second HTTP stack and pre-1.0 churn; HTTP/2 lets a route share one TLS handshake (~14 ms import) | The SDK reaches 1.0 with an import cost near httpx's |
+| D19 | Judge concurrency 8 per process (2026-09-24) | TypeSafe's cookbooks: "the public endpoint rate-limits above roughly eight" concurrent requests | 429 share in decision logs; TypeSafe publishes a concurrency limit |
+| D20 | Final pass only in walk mode, one request unless it exceeds the backend's limits (2026-09-24) | Flat mode already judged every leaf with the strict wording; request count doesn't drive latency | – |
 
 ---
 
 ## 4. Prior art and what we borrow
 
-**Ideas only.** Before copying any code, check each project's license. The jev-router repository listing reviewed during design showed no LICENSE file, and code without a license can't be reused cleanly. jev-code-context-router and JevRouter are MIT-licensed.
+**Ideas only.** Before copying any code, check each project's license. Checked 2026-09-23: jev-router, blink and jev-knowledge-base have no LICENSE file, and code without a license can't be reused cleanly. jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router and jev-skillful are MIT-licensed.
 
 | Project | Idea we borrow |
 |---|---|
@@ -197,9 +204,11 @@ flowchart TB
         P([Prompt]) --> SKIP{Skip?}
         SKIP -->|yes| PASS([Agent runs unchanged])
         SKIP -->|no| PM[Path matching]
-        PM --> C1[Jev call 1<br/>continuity Choice<br/>+ capability Nouls<br/>+ small-repo content Nouls]
+        PM --> C1[Jev call 1<br/>continuity Choice<br/>+ capability Nouls]
         C1 -->|same| LEASE[Reuse leased selection]
-        C1 -->|extends / new| WALK[Jev directory walk<br/>lenient, parallel, flatten ≤40]
+        C1 -->|extends / new<br/>index within flat budget| FLAT[Jev flat pass<br/>one strict Noul per file card<br/>same wave as call 1]
+        FLAT --> SEL
+        C1 -->|extends / new<br/>index above flat budget| WALK[Jev directory walk<br/>lenient, parallel, flatten ≤40]
         WALK --> EXP[Graph expansion]
         EXP --> FIN[Jev final pass<br/>strict Nouls ≤40 cards]
         FIN --> SEL[Select · budget · lease update]
@@ -210,6 +219,7 @@ flowchart TB
 
     CAT --> PM
     CAT --> C1
+    CAT --> FLAT
     CAT --> WALK
     CAT --> EXP
     GIT[Git hooks · SessionStart check · CI] -->|changed hashes| DISC
@@ -603,7 +613,8 @@ Here `anchor_strength` is the anchor's walk probability, or 1.0 for path matches
   "cochange_head": "a1b2c3d",
   "counts": { "code_file": 1840, "code_dir": 212, "doc_file": 96, "db_table": 41, "mcp_server": 4, "skill": 18 },
   "content_cards": 2189,
-  "walk_mode": "walk",
+  "flat_cards": 1977,
+  "flat_card_tokens": 98850,
   "built_at": "2026-09-23T21:40:00Z"
 }
 ```
@@ -673,11 +684,14 @@ sequenceDiagram
     AD->>RT: prompt + session_id + prior user message
     RT->>RT: Step 0 skip rules
     RT->>RT: Step 1 path matching
-    RT->>J: Step 2 call 1: continuity + capabilities (+ all content if small repo)
+    RT->>J: Step 2 call 1: continuity + capabilities (same wave: flat pass, or walk level 1)
     J-->>RT: answers
     alt same
         RT-->>AD: no note (lease continues)
-    else extends / new
+    else extends / new, flat mode
+        RT->>RT: Step 6 select from flat-pass answers + budget + lease update
+        RT-->>AD: pointer note
+    else extends / new, walk mode
         RT->>J: Step 3 walk level 1 (parallel chunks)
         J-->>RT: probabilities
         RT->>J: walk level 2 (only if needed)
@@ -691,7 +705,7 @@ sequenceDiagram
     AD-->>AG: prompt (+ note)
 ```
 
-**Speculative execution:** walk level 1 is fired **in parallel** with call 1, and its result is discarded if call 1 says `same`. The extra cost is negligible, and it removes one round trip from the new-task path.
+**Speculative execution:** the flat pass (flat mode) or walk level 1 (walk mode) is fired **in parallel** with call 1 as separate requests, and its result is discarded if call 1 says `same`. The extra cost is negligible (a discarded 40k-token flat pass is ~$0.0017), and it removes a round trip from the new-task path. In flat mode a new task needs one round trip in total.
 
 ### 11.2 Step 0: skip rules (no Jev call)
 
@@ -737,9 +751,7 @@ One request, with all questions evaluated in parallel over the same state.
 | `continuity` | Choice: `same` / `extends` / `new` | lease exists | "How does the current request relate to the previous task? `same`: continues the same work with no new area of the project. `extends`: same overall goal but involves a new area, file type, or capability. `new`: a different task." |
 | `needs_context` | Noul | always | "Answering the request requires information about this specific project's files, documentation, or database." |
 | `cap:<id>` | Noul, one per capability | always | "Completing the request likely requires using this capability: {card}" |
-| `file:<id>` | Noul, one per content card | small-repo mode only | "This item likely contains information needed for the request: {card}" |
-
-If there are more than 40 capability surfaces, split them into parallel requests of ≤ 40, each repeating the state.
+Call 1 is split into parallel requests only when it exceeds the backend's per-request limits (07), each repeating the state. Content questions are never in call 1 (D16): the flat pass (§11.5) asks them with their own state.
 
 **Illustrative request** (confirm field names against the [TypeSafe docs](https://docs.typesafe.ai/primitives) during Phase 1):
 
@@ -767,20 +779,22 @@ If there are more than 40 capability surfaces, split them into parallel requests
 | `continuity = same` with confidence < 0.6 | Treat as `extends` (the safe middle) |
 | `continuity = extends` | Walk, then **union** the result with the lease |
 | `continuity = new`, or no lease | Walk, then **replace** the lease |
-| `needs_context < 0.25` and no path hits | Emit capability lines only, no content pointers |
-| Small-repo mode | Content Nouls already answered, so skip Step 3 and go to Step 4 |
+| `needs_context < 0.25` and no path hits (walk mode) | Emit capability lines only, no content pointers. In flat mode the content answers themselves are the gate: nothing above threshold → capability lines only |
+| Flat mode | Content already judged by the flat pass: skip Steps 3–5 and go to Step 6 |
 
 Capability selection: **use** if the Noul is ≥ 0.6, **not needed** if ≤ 0.15, and unmentioned in between. The asymmetry is deliberate: telling an agent not to use something it needs costs more than an unmentioned capability.
 
-### 11.5 Step 3: the directory walk
+### 11.5 Step 3: flat pass or directory walk
 
-**Purpose:** narrow a tree of thousands of content cards down to ≤ ~40 plausible candidates using Jev's natural-language judgment. It is lenient by design, because precision is the final pass's job.
+**Flat pass (default when it fits).** If the flat pass for the index fits `flat_max_tokens` (default 40,000 estimated input tokens, about 450 file cards), the router asks one Noul per leaf content card (code file, doc file, table; plus any path-hit ids) with the **final** wording (§11.7) and state `request` + `project`. The requests go out in the same wave as call 1, split by the backend's per-request limits. There is no walk, no expansion and no separate final pass: selection (§11.8) reads the flat answers directly. The budget is a token budget, not a card count, because Jev's rate limit is account-wide tokens per second (250k/s for `jev-1.13`) and every session shares it.
+
+**Directory walk (above the budget).** **Purpose:** narrow a tree of thousands of content cards down to ≤ ~40 plausible candidates using Jev's natural-language judgment. It is lenient by design, because precision is the final pass's job.
 
 **Parameters (defaults; all tunable in config and via evaluation):**
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `small_repo_cutoff` | 60 | Content cards at or below this count skip the walk |
+| `flat_max_tokens` | 40,000 | Flat pass instead of the walk when its estimated input tokens fit (D14) |
 | `flatten_at` | 40 | A selected subtree with ≤ this many files is flattened into final candidates |
 | `chunk_size` | 40 | Maximum children per Jev request |
 | `tau_walk` | 0.35 | Selection threshold at walk levels (lenient) |
@@ -854,9 +868,9 @@ Anchors are path hits plus walk candidates. For each anchor, gather depth-1 neig
 
 Truncate to 40.
 
-### 11.7 Step 5: final pass
+### 11.7 Step 5: final pass (walk mode)
 
-One request, or two in parallel if the pool is split for mixed types. It's strict.
+One request, split only if it exceeds the backend's per-request limits (D20). It's strict. The flat pass uses the same wording and state.
 
 - **State:** `request`, `project`.
 - **Questions:** one Noul per candidate: "This item is needed to answer or complete the request: {card}".
@@ -882,10 +896,12 @@ Then update the lease (§12) and build the note (§14).
 |---|---|---|
 | Skip | 0 | < 20 ms |
 | `same` (lease reuse) | 1 | ≤ 0.5 s |
-| Small repo, new task | 1–2 | ≤ 1.0 s |
-| Walk repo, new task | 2–4 (level 1 speculative) | ≤ 1.5 s |
+| Flat mode, new task | 1 (flat pass in the same wave as call 1) | ≤ 1.0 s |
+| Walk mode, new task | 2–4 (level 1 speculative) | ≤ 1.5 s |
 
-**Cost:** a new-task route in a mid-size repo sends roughly 10–30k Jev input tokens in total across calls. At $0.042 per million input tokens (output is free), that's about $0.001 or less per route. Latency is the binding constraint, not cost.
+**Cost:** a flat-mode route sends up to `flat_max_tokens` (40k) input tokens, about $0.0017; a walk-mode route roughly 10–30k tokens. At $0.042 per million input tokens (output is free), every route stays well under $0.01. The binding constraints are latency and the account-wide token rate (250k tokens/s), not price.
+
+**Where the time goes:** Jev answers in ~100 ms typically (70–500 ms end to end, per TypeSafe). A cold hook process adds Python start-up and a TLS handshake (0.2–0.3 s) per prompt, so the judge client uses HTTP/2 to share one connection per route (D18), and the `same` path is measured in Phase 0 against its 0.5 s target.
 
 **Hard deadline:** 3 s end to end. When it passes, return the best-so-far selection if the final pass has run, otherwise capabilities only. Fail open beyond that.
 
@@ -981,13 +997,13 @@ class Judge(Protocol):
                  *, timeout_ms: int) -> Sequence[Mapping[str, NoulA | ChoiceA]]: ...
 ```
 
-The router speaks only this interface. Thresholds are stored **per judge backend**, because probabilities aren't comparable across backends (or between Noul and Choice, even within Jev).
+On the wire, Jev takes Choice options as `criteria` and answers Nouls in a `noul` field; the adapter maps them (07, `docs/jev-reference.md`). The router speaks only this interface. Thresholds are stored **per judge backend**, because probabilities aren't comparable across backends (or between Noul and Choice, even within Jev).
 
 ### 13.2 Backends
 
 | Backend | Use | Notes |
 |---|---|---|
-| `jev` (default) | Production | Providers: TypeSafe direct, OpenRouter, Vercel AI Gateway, Cloudflare. Pin the model version. Retry once on 5xx or timeout, then fail open. |
+| `jev` (default) | Production | Providers: TypeSafe direct (exact version pin) and OpenRouter (minor-version pin, no waitlist) (D17). Pin the model version. Retry once on timeout, 408, 5xx (incl. TypeSafe's 529 Overloaded) or a 429 whose wait fits the deadline, then fail open. |
 | `systemone-local` | Offline, privacy-sensitive | Any `/v1/systemone`-compatible endpoint (community open reproductions). Expect lower accuracy, especially with many options. Evaluate before relying on it. |
 | `llm` | Evaluation baseline only | Structured-output LLM that returns probabilities. Measures whether Jev earns its dependency (§17.5). |
 | `null` | Fail-open, tests | Returns "no decision"; the router emits nothing. |
@@ -996,7 +1012,8 @@ The router speaks only this interface. Thresholds are stored **per judge backend
 ### 13.3 Resilience
 
 - Per-request timeout: 1,200 ms. Global route deadline: 3 s.
-- Concurrency limit: 16 in-flight requests (configurable) to respect provider rate limits.
+- Concurrency limit: 8 in-flight requests per process (configurable) to respect provider rate limits (D19). One HTTP/2 connection per route.
+- Request size: bounded per backend (Jev: ≤ 30k estimated tokens per request, within OpenRouter's 32k context and TypeSafe's 64k).
 - Circuit breaker: after 3 consecutive failures, skip the judge for 60 s and fail open.
 - Every failure is logged with its status code (§18).
 
@@ -1152,7 +1169,7 @@ live_mcp = ["supabase"]                      # servers to list live at init
 linear = "Issue tracker: tickets, projects, cycles"
 
 [router]
-small_repo_cutoff = 60
+flat_max_tokens = 40000                      # flat pass instead of the walk when it fits (§11.5)
 flatten_at = 40
 chunk_size = 40
 beam_max = 6
@@ -1160,7 +1177,7 @@ max_depth = 4
 max_candidates = 40
 max_pointers = 12
 deadline_ms = 3000
-speculative_walk = true
+speculative = true                           # flat pass or walk level 1 in the same wave as call 1
 
 [router.thresholds.jev]                      # per-backend thresholds (§13.1)
 walk = 0.35
@@ -1178,11 +1195,11 @@ idle_minutes = 45
 
 [judge]
 backend = "jev"                              # jev | systemone-local | llm | null
-provider = "typesafe"                        # typesafe | openrouter | vercel | cloudflare
+provider = "typesafe"                        # typesafe | openrouter
 model = "jev-1.13.0"
 timeout_ms = 1200
-max_concurrency = 16
-# API key from env: TYPESAFE_API_KEY / OPENROUTER_API_KEY / AI_GATEWAY_API_KEY
+max_concurrency = 8
+# API key from env: TYPESAFE_API_KEY / OPENROUTER_API_KEY
 
 [privacy]
 redact_prompt = true
@@ -1286,12 +1303,13 @@ This tells you which knob to turn and is the most useful single report.
 
 | ID | Configuration | Question it answers |
 |---|---|---|
-| A0 | Flat brute force: all content cards, chunked, final-pass wording | Does the walk beat just asking about everything? (It measures the false-positive problem.) |
-| A1 | Walk only (no expansion) | Baseline walk quality |
+| A0 | Flat everywhere: all leaf content cards, final-pass wording, regardless of the budget | Does judging every file directly beat walking? (It measures the false-positive problem.) |
+| A1 | Walk only (no expansion), walk forced | Baseline walk quality |
 | A2 | A1 + containment expansion | |
 | A3 | A2 + co-change | Does co-change fix cross-layer misses? |
-| A4 | A3 + schema refs (full v1) | Does the schema reach the note via expansion? |
-| A5 | A4 without `coupled_dirs` on directory cards | Is directory co-change on cards worth it? |
+| A4 | Defaults (full v1: flat pass within `flat_max_tokens`, walk with all expansion above it) | Headline configuration |
+| A4w | A4 with the walk forced for every repo | With A0: where should `flat_max_tokens` sit? (D14) |
+| A5 | A4w without `coupled_dirs` on directory cards | Is directory co-change on cards worth it? |
 | A6 | A4 with the `llm` judge | Does Jev earn the dependency on accuracy and latency? |
 | A7 | A4 with `systemone-local` | Is a local fallback viable? |
 | A8 | Threshold sweeps: `walk` ∈ {0.2…0.5}, `final` ∈ {0.4…0.8}, `beam_max` ∈ {3, 6, 10} | Tuning |
@@ -1388,17 +1406,22 @@ TypeSafe documents that Jev doesn't treat state as hostile by default. v1 minimi
 
 ## 20. Jev limitations and design responses
 
-From TypeSafe's own [jev-1.13 jaggedness notes](https://docs.typesafe.ai/model-jaggedness/jev-1.13):
+From TypeSafe's own [jev-1.13 jaggedness notes](https://docs.typesafe.ai/model-jaggedness/jev-1.13) (reviewed 2026-09-17; rows updated 2026-09-24, see `docs/jev-reference.md` §10):
 
 | Limitation | v1 response |
 |---|---|
-| Accuracy drops with large, irrelevant state | ≤ 40 candidates per request; walk narrows before judging; cards are budgeted |
+| Accuracy drops with large, irrelevant state | State is only the redacted prompt and a few bounded fields (≈ 2k tokens); candidates go in independently judged questions; cards are budgeted; flat/walk requests don't carry continuity context (D16) |
 | Literal reading of instructions | Explicit wording per question, chosen by evaluation (§17.6) |
 | Weak at numbers, dates, counting | All scoring math, thresholds, budgets and recency live in code |
 | Susceptible to adversarial content in state | Structural cards only; no permissions granted; adversarial evaluation fixtures |
 | Noul and Choice outputs aren't directly comparable | Per-question-type thresholds; Choice only for continuity; per-backend threshold sets |
 | Choice capped at 255 options | Nouls for all candidate judgments |
-| Hosted, early access, rate limits | Judge interface; multiple providers; concurrency cap; circuit breaker; fail-open |
+| Hosted, early access, rate limits (1,200 requests/min, 250k tokens/s per account, "adjusting dynamically") | Judge interface; TypeSafe and OpenRouter providers; concurrency cap 8; per-route token budget; circuit breaker; fail-open |
+| Indirection (multi-hop questions, double negatives) answered less reliably | Every question is one hop about one card; no negated wordings; flat mode judges files directly instead of through directory cards |
+| Contradictory instructions and criteria confuse it | Continuity option descriptions are designed and evaluated with their instruction as one wording unit |
+| Structural invariants don't hold (a Noul and its negation don't sum to 1; Noul vs yes/no Choice differ) | Per-question-type thresholds; "not needed" comes from the low end of the "use" Noul, never a negated question |
+| Not a generator | surf never asks Jev for text |
+| English-first; other languages handled less well | Decision records tag non-English prompts so evaluation can slice them |
 | Cannot look anything up | Pointers, not payloads; the note tells the agent to search normally |
 
 ---
@@ -1430,7 +1453,7 @@ From TypeSafe's own [jev-1.13 jaggedness notes](https://docs.typesafe.ai/model-j
 |---|---|---|
 | Language | Python 3.11+ | Matches the official TypeSafe SDK and most prior art; easy distribution via `uv` |
 | Distribution | `uv tool install surf` / `pipx` | One command, isolated environment |
-| Judge client | `typesafe-sdk-python` (pinned) + thin `httpx` adapters for gateways | Official SDK plus provider flexibility |
+| Judge client | `httpx` (async, HTTP/2 via `h2`) with one wire codec for every provider; `typesafe-sdk` (pinned) as a dev-only cross-check | One codec, lower hook import cost, stable dependency (D18) |
 | SQL parsing | `sqlglot` | Multi-dialect DDL parsing without a database |
 | Text search | `ripgrep` if present, else `pyahocorasick` + `re` | Fast schema-ref scanning |
 | Storage | JSONL (source of truth) + SQLite (cache) | Diffable, commit-friendly, fast lookups |
@@ -1529,7 +1552,7 @@ Estimates assume one experienced engineer. They're rough, and the phase exit cri
 - Skip rules, path matching (with normalization tests), call 1, walk (chunking, flattening, beam, dead-end guard, deadline, speculative level 1), final pass, selection, note.
 - First threshold and wording sweeps on dev (A1, A8 partial).
 
-**Exit:** A1 beats A0 on precision at comparable recall, **or** there's a documented reason to change approach.
+**Exit:** the flat-vs-walk comparison (A0 vs A4w) on repos under the budget confirms or moves `flat_max_tokens`, and A1 beats A0 on precision at comparable recall on repos above it, **or** there's a documented reason to change approach.
 
 ### Phase 3: Graph (3–4 days)
 
@@ -1616,7 +1639,8 @@ Each addition must show a paired improvement on dev, confirmed on test, before i
 | **Walk** | Jev-guided descent through the directory tree to generate candidates |
 | **Flatten** | Admitting all files of a small selected subtree as candidates without further walking |
 | **Beam** | The maximum number of children expanded per node during the walk |
-| **Final pass** | The strict Jev judgment over the ≤ 40 pooled candidates |
+| **Flat pass** | Flat mode's single wave: one strict Noul per leaf content card, used when it fits the per-route token budget |
+| **Final pass** | Walk mode's strict Jev judgment over the ≤ 40 pooled candidates |
 | **Lease** | The cached routing selection for the current task |
 | **Continuity** | The same / extends / new classification of a new prompt relative to the lease |
 | **Judge** | Any backend implementing the decision interface (Jev by default) |

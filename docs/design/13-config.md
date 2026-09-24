@@ -163,11 +163,11 @@ The spec's `deadline_ms` names two budgets (00 §5). It's split into `walk_deadl
 
 | Key | Type | Default | Validation | Owner |
 |---|---|---|---|---|
-| `router.mode` | `Literal["auto","flat"]` | `"auto"` | `flat` = ablation A0 | 16, 09 |
-| `router.small_repo_cutoff` | int | `60` | 0–1,000 | 09 |
+| `router.mode` | `Literal["auto","flat","walk"]` | `"auto"` | `auto` chooses by `flat_max_tokens`; `flat` = A0, `walk` = A1–A3, A4w | 16, 09 |
+| `router.flat_max_tokens` | int | `40000` | 0–200,000 (0 = always walk) | 09 (spec D14) |
 | `router.flatten_at` | int | `40` | 1–200 | 09 |
 | `router.flatten_factor` | Prob | `0.9` | | 09 |
-| `router.chunk_size` | int | `40` | 5 – `judge.max_questions_per_request` | 09 |
+| `router.chunk_size` | int | `40` | 5 – effective `judge.max_questions_per_request`; walk children per request | 09 |
 | `router.beam_max` | int | `6` | 1–40 | 09 |
 | `router.beam_min` | int | `1` | 0 – `beam_max` | 09 |
 | `router.max_frontier` | int | `12` | 1–100 | 09 |
@@ -183,10 +183,10 @@ The spec's `deadline_ms` names two budgets (00 §5). It's split into `walk_deadl
 | `router.deadline_ms` | int | — | deprecated alias → `route_deadline_ms` | 13 |
 | `router.min_level_ms` | int | `400` | ≥ 50 | 09 |
 | `router.min_final_ms` | int | `300` | ≥ 50 | 09 |
-| `router.speculative_walk` | bool | `true` | | 09 |
+| `router.speculative` | bool | `true` | flat pass / walk L1 in the same wave as call 1 | 09 |
+| `router.speculative_walk` | bool | — | deprecated alias → `speculative` | 13 |
 | `router.request_max_tokens` | int | `1500` | 200–8,000 | 09, 14 |
 | `router.context_max_tokens` | int | `300` | 50–2,000 (`previous_task`, `last_message`) | 09 |
-| `router.final_max_request_tokens` | int | `6000` | ≤ `judge.max_request_tokens` | 09 |
 
 `[router.skip]`
 
@@ -263,13 +263,14 @@ Profile keys must match `^(jev|systemone-local|llm|fixture)(:[A-Za-z0-9._-]+)?$`
 | Key | Type | Default | Validation |
 |---|---|---|---|
 | `judge.backend` | `Literal["jev","systemone-local","llm","null","fixture"]` | `"jev"` | §4.4 purpose rules |
-| `judge.provider` | `Literal["typesafe","openrouter","vercel","cloudflare"]` | `"typesafe"` | `jev` backend only |
-| `judge.model` | str | `"jev-1.13.0"` | non-empty; `*latest*` → soft-limit warning (pin versions) |
+| `judge.provider` | `Literal["typesafe","openrouter"]` | `"typesafe"` | `jev` backend only; no `cloudflare` (07 D-07-9), `vercel` deferred (07 D-07-10) |
+| `judge.model` | str | `"jev-1.13.0"` | non-empty; an alias (`*latest*`, `*preview*`) → soft-limit warning (pin versions; aliases move when TypeSafe ships a release) |
 | `judge.timeout_ms` | `int \| None` | `None` → per backend: jev 1200, systemone-local 3000, llm 20000 | 100–60,000; per attempt |
 | `judge.min_request_ms` | int | `150` | 0–5,000 |
-| `judge.max_concurrency` | int | `16` | 1–128; per process |
-| `judge.max_questions_per_request` | int | `40` | 5–255 (Choice cap) |
-| `judge.max_request_tokens` | int | `8000` | ≥ 1,000 |
+| `judge.max_concurrency` | int | `8` | 1–128; per process (07 D-07-8) |
+| `judge.max_questions_per_request` | `int \| None` | `None` → backend default (07 §4.2: jev 500, systemone-local 64, llm 40) | 5–1,000; ≥ 3 so continuity fits |
+| `judge.max_request_tokens` | `int \| None` | `None` → backend default (07 §4.2: jev 30,000, others 8,000) | 1,000–64,000 (`jev-1.13` context: 64k per request, 32k for state + longest question; OpenRouter lists 32k) |
+| `judge.http2` | bool | `true` | HTTP/2 via `httpx[http2]` (07 D-07-12) |
 | `judge.retry` | bool | `true` | retry-once policy (spec §13.2) |
 | `judge.breaker.failures` | int | `3` | 1–50 consecutive failed batches |
 | `judge.breaker.cooldown_s` | int | `60` | 1–3,600 |
@@ -277,7 +278,6 @@ Profile keys must match `^(jev|systemone-local|llm|fixture)(:[A-Za-z0-9._-]+)?$`
 | `judge.price_per_mtok_input` | float | `0.042` | ≥ 0, USD |
 | `judge.price_per_mtok_output` | float | `0.0` | ≥ 0 |
 | `judge.base_url`, `judge.path` | `str \| None` | `None` | override provider defaults; no userinfo, no secret-looking query params |
-| `judge.cloudflare.account_id`, `judge.cloudflare.gateway_id` | `str \| None` | `None` | required when `provider = "cloudflare"` |
 | `judge.local.base_url` | str | `"http://127.0.0.1:8080"` | `systemone-local` |
 | `judge.llm.base_url`, `judge.llm.model`, `judge.llm.key_env` | `str \| None` | `None` | required when `backend = "llm"`; `key_env` is an env var **name** `^[A-Z_][A-Z0-9_]*$` |
 | `judge.llm.allow_routing` | bool | `false` | |
@@ -449,7 +449,7 @@ model = "jev-1.13.0"
 | `SURF_SKIP_HOOKS=1` | git hooks no-op (06 §4.5) |
 | `SURF_FIXTURE_MODE` | overrides `judge.fixture.mode` (07) |
 | `SURF_MCP_TOKEN` | Bearer token for non-loopback MCP HTTP (12) |
-| `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `CF_AIG_TOKEN`, `SYSTEMONE_LOCAL_API_KEY` | judge credentials; names and provider mapping owned by 07 §3.2 |
+| `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `SYSTEMONE_LOCAL_API_KEY` | judge credentials; names and provider mapping owned by 07 §3.2 |
 
 An override of an unknown path is an `unknown-key` warning.
 
@@ -468,14 +468,13 @@ Cross-field rules (`model_validator(mode="after")`):
 | Each thresholds table: `walk ≤ final` | warning (spec principle 3) |
 | `router.walk_deadline_ms < router.route_deadline_ms` | error |
 | effective `judge.timeout_ms ≤ router.route_deadline_ms` | error |
-| `router.chunk_size ≤ judge.max_questions_per_request` | error |
-| `router.final_max_request_tokens ≤ judge.max_request_tokens` | error |
+| `router.chunk_size ≤` effective `judge.max_questions_per_request` | error |
 | `router.beam_min ≤ router.beam_max` | error |
 | `router.flatten_at ≤ router.max_candidates` | warning |
-| `router.chunk_size > 40` or `router.max_candidates > 40` | warning (spec principle 5) |
+| `router.max_candidates > 40` | warning (final-pass size; spec §11.7) |
+| `router.flat_max_tokens > 100000` | warning: one route would use ≥ 40 % of `jev-1.13`'s 250k tokens/s account budget |
 | `delivery.claude_code.prompt_timeout_s * 1000 ≥ router.route_deadline_ms + 2000` | error otherwise (Claude Code would kill the hook before the deadline fires) |
 | `delivery.claude_code.session_timeout_s * 1000 ≥ refresh.session_start_wait_ms + 1000` | error otherwise |
-| `judge.provider == "cloudflare"` requires `judge.cloudflare.account_id` and `gateway_id` | error |
 | `judge.backend == "llm"` requires `judge.llm.base_url`, `model`, `key_env` | error |
 | `judge.backend == "llm"` with `purpose="runtime"` and not `judge.llm.allow_routing` | error (spec §13.2: eval baseline) |
 | `judge.backend == "fixture"` with `purpose="runtime"` | warning (tests only) |
@@ -598,6 +597,7 @@ This doc *is* the configuration registry. Every component doc's §5 must list on
 | D-13-6 | §9.5 / §16: `index.commit_catalog = true` | Default `false`; committed baseline via `surf index --baseline` (05 D-05-1, 06 D-06-1; pending user decision Q-06-1) | Hook-driven refresh would otherwise dirty the tree after every commit |
 | D-13-7 | §16: single `.surf/config.toml` | Layered discovery: user, project, project-local, extra, env, CLI | Personal settings shouldn't require editing a committed file |
 | D-13-8 | n/a (design docs disagreed) | Resolved names: `capabilities.user_level` (not `user_configs`, 14); `router.expand.enabled_kinds` (not `router.expand_kinds`, 16); no `tables_per_anchor` key (09 dropped its own; tables per anchor are bounded by 04's `router.expand.max_per_anchor`); `router.wording.*` (09); `judge.fixture.{mode,miss,simulate_latency,path}` (07, not `fixture.dir`); `log.max_files` (15); `privacy.redact_patterns` (14); exclude-author substrings (04) | One name per key; the owning component's name wins, and where two owners overlap, the more structured name wins |
+| D-13-9 | §16: `router.small_repo_cutoff = 60`, `speculative_walk`; `judge.max_concurrency = 16`; provider list incl. vercel/cloudflare | `router.flat_max_tokens` (40,000) replaces `small_repo_cutoff`; `router.speculative` (old name a deprecated alias); `router.final_max_request_tokens` removed; judge request limits per backend; `judge.http2`; concurrency 8; providers `typesafe`, `openrouter` | Spec D14–D20 (2026-09-24); the spec's §16 sample was updated with them |
 
 ### Open questions
 

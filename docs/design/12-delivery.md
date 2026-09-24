@@ -173,13 +173,18 @@ Input (stdin JSON; unknown fields ignored; only `hook_event_name` is required):
 | `transcript_path` | previous-message fallback (§4.4.4) |
 | `cwd` | root discovery start; `RouteRequest.cwd`; note root hint |
 | `prompt` (UserPromptSubmit) | the request |
-| `source` (SessionStart) | `startup` / `resume` / `clear` / `compact` |
+| `source` (SessionStart) | `startup` / `resume` / `clear` / `compact` / `fork` (CC hooks docs, 2026-09-23; `fork` before v2.1.214 reported `resume`) |
+| `reason` (SessionEnd) | `clear` / `resume` / `logout` / `prompt_input_exit` / `other` |
+
+Other common fields (`prompt_id`, `permission_mode`, `agent_id`, `agent_type`, …) are ignored. `prompt` arrives with pasted blocks expanded between `<pasted_content id="…">` and `</pasted_content id="…">` lines; 08 and 14 tolerate them.
 
 Output for `UserPromptSubmit` with a note (stdout, exit 0):
 
 ```json
 {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "[surf] Likely relevant — …"}}
 ```
+
+Claude Code caps `additionalContext` (and plain stdout) at 10,000 characters; beyond that it saves the text to a file and shows a 2,000-character preview. The note is far smaller (11), but the adapter truncates at 9,500 characters as a guard. Any non-empty stdout is injected as context, so nothing else may print (00 §6).
 
 No note → exit 0 with **empty** stdout. Every other event → exit 0, empty stdout. The adapter never exits non-zero and never writes anything except the protocol JSON to stdout. Logging goes to stderr only at `-v` / `SURF_DEBUG=1`, because Claude Code surfaces stderr in some modes.
 
@@ -236,8 +241,8 @@ def read_prev_user_text(payload: Mapping, current_prompt: str, *,
 
 #### 4.4.5 `SessionStart`, `SessionEnd`, `Stop`
 
-- **SessionStart**: if `source in {"clear","compact"}`: `leases.expire(sid, reason)` first (cheap, so it can't be lost to a timeout). Then `refresh.ensure_fresh(wait_ms=refresh.session_start_wait_ms)` (06 §4.5): when fresh (the common case) this returns in ≤ 150 ms. When stale it triggers a background refresh and **waits** up to 3 s, and the refresh keeps running after the wait (D-06-3). Then `leases.gc()`. No stdout. Routes that arrive during a refresh read the previous immutable SQLite snapshot (05), and lease validation catches changed pointers (10 §4.8).
-- **SessionEnd**: expire the lease and the session control file.
+- **SessionStart**: if `source == "compact"` (same session continues): `leases.expire(sid, reason)` first. `source == "clear"` arrives with a **new** session id ("Running `/clear` starts a new session"), so it has no lease; the old one is expired by SessionEnd. `fork` is a new id with no lease. The expire runs first because it is cheap and can't be lost to a timeout. Then `refresh.ensure_fresh(wait_ms=refresh.session_start_wait_ms)` (06 §4.5): when fresh (the common case) this returns in ≤ 150 ms. When stale it triggers a background refresh and **waits** up to 3 s, and the refresh keeps running after the wait (D-06-3). Then `leases.gc()`. No stdout. Routes that arrive during a refresh read the previous immutable SQLite snapshot (05), and lease validation catches changed pointers (10 §4.8).
+- **SessionEnd**: expire the lease and the session control file. This is the expiry path for `/clear` (`reason="clear"`, old `session_id`), so D-12-5 is required, not optional. Claude Code discards SessionEnd output and gives it 1.5 s by default (raised to the handler's `timeout`); a crash or kill may skip it, so idle expiry stays the backstop.
 - **Stop** (off by default): read the transcript tail for `Read`/`Grep` tool uses since the last routed prompt and append `{"kind":"feedback","route_id","opened":[ids…]}` to the decision log (15). v1 only records; nothing consumes it.
 
 #### 4.4.6 Installer (`claude_code.install(root, *, shared: bool, stop_hook: bool)`)
@@ -266,7 +271,7 @@ Algorithm (via `_jsonfile.py`):
 1. Read the file. Missing → start from `{}`. Invalid JSON (comments, trailing commas) → **abort this step** with an actionable error; never rewrite a file surf can't parse.
 2. Back up the original bytes to `<git-common-dir>/surf/backups/<basename>.<utc>.bak` (non-git: `.surf/cache/backups/`, §3.2) (first install only; re-installs don't create new backups).
 3. For each event, remove existing **surf-owned** hook commands, identified by a command whose first word's basename is `surf-hook`, or which contains `surf-hook ` inside the shared wrapper, or which starts with `surf hook claude`. Drop matcher groups left empty by that removal. Don't touch other groups or keys.
-4. Append one surf group per event (after existing groups, so user hooks run first).
+4. Append one surf group per event after existing groups. Order has no effect: "All matching hooks run in parallel", and an identical handler defined in several settings files runs once.
 5. Serialize preserving key order, the detected indent (2/4 spaces or tab) and trailing newline; write atomically.
 6. Local mode only: if `git check-ignore -q .claude/settings.local.json` fails, append the path to `.git/info/exclude` (local, never committed) and record it in the manifest.
 7. Record `InstalledItem(kind="claude_hooks", created, backup, sha256_after)`.
@@ -275,7 +280,7 @@ Idempotency: running install twice yields identical bytes (tested). Switching lo
 
 ### 4.5 MCP server (`surf mcp`)
 
-Built on the official MCP Python SDK (`FastMCP`). Imported only by `surf mcp`.
+Built on the official MCP Python SDK. SDK v2 (for the 2026-07-28 MCP spec) renamed `FastMCP` to `MCPServer` (`from mcp.server import MCPServer`) and moved transport options to `run()`; pin `mcp>=2,<3` (Q-12-8). Imported only by `surf mcp`.
 
 #### 4.5.1 Tools
 
@@ -530,7 +535,7 @@ class RouteOutput(BaseModel):
   "root": "/abs/path",
   "enabled": {"effective": true, "disabled_by": null, "project": true, "session": null},
   "index": {"present": true, "schema_version": 1, "index_head": "a1b2c3d", "head": "a1b2c3d",
-            "stale": false, "built_at": "…", "content_cards": 2189, "walk_mode": "walk",
+            "stale": false, "built_at": "…", "content_cards": 2189, "route_mode": "walk",
             "refresh_running": false},
   "judge": {"backend": "jev", "provider": "typesafe", "model": "jev-1.13.0", "key_present": true,
             "breaker": {"state": "closed", "open_until": null}},
@@ -547,7 +552,7 @@ class RouteOutput(BaseModel):
 
 | Command | Schema | Fields |
 |---|---|---|
-| `index` | `surf.index/1` | `counts`, `content_cards`, `walk_mode`, `duration_ms`, `index_head`, `check: {ok, added[], removed[], changed[]} \| null` (lists capped at 50) |
+| `index` | `surf.index/1` | `counts`, `content_cards`, `route_mode` (flat or walk, from meta `flat_card_tokens` and the effective `router.flat_max_tokens`, 09 §4.5), `duration_ms`, `index_head`, `check: {ok, added[], removed[], changed[]} \| null` (lists capped at 50) |
 | `refresh` | `surf.refresh/1` | `skipped: null\|"busy"\|"fresh"`, `changed_files`, `cards_updated`, `edges_updated`, `duration_ms` |
 | `doctor` | `surf.doctor/1` | §4.11 |
 | `init` | `surf.init/1` | `plan`, `installed: [InstalledItem]`, `warnings`, `smoke: [{prompt, status, latency_ms}]` |
@@ -601,7 +606,7 @@ class RouteOutput(BaseModel):
 | Path | Budget (p50 / p95, warm disk) |
 |---|---|
 | `surf-hook prompt` fast exits (no project, disabled, control command, ack skip) | ≤ 60 ms / 100 ms wall, stdlib + `tomllib` only |
-| `surf-hook prompt` import overhead before routing (pydantic, httpx, sqlite3, surf core; no typer/rich/mcp) | ≤ 200 ms / 300 ms |
+| `surf-hook prompt` import overhead before routing (pydantic, httpx + h2, sqlite3, surf core; no typer/rich/mcp) | ≤ 200 ms / 300 ms (httpx ~80–95 ms, h2 ~14 ms, pydantic ~24 ms measured 2026-09-24) |
 | `surf-hook session-start` | ≤ 150 ms when fresh; ≤ `session_start_wait_ms` + 50 ms when stale (06) |
 | `surf route` CLI overhead over engine (typer import) | ≤ 250 ms |
 | MCP tool-call overhead over engine | ≤ 10 ms |
@@ -660,10 +665,12 @@ The spec's latency targets (§1.2, §11.9) are **engine** targets. Hook wall tim
 
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
-| Q-12-1 | Does Claude Code keep the same `session_id` after `/clear`? | Expire the payload's id on `source="clear"`; stale ids idle out | Verify against current Claude Code; test fixture |
-| Q-12-2 | Is the current prompt already in the transcript when `UserPromptSubmit` runs? | Handle both (skip the first exact match once) | Verify; fixture for each |
+| Q-12-1 | Does Claude Code keep the same `session_id` after `/clear`? | Resolved 2026-09-23: no. "Running `/clear` starts a new session" (CC interactive-mode docs); SessionEnd fires with `reason="clear"` for the old id. Expire in SessionEnd (§4.4.5); idle expiry is the backstop | – |
+| Q-12-2 | Is the current prompt already in the transcript when `UserPromptSubmit` runs? | Handle both (skip the first exact match once). Narrowed 2026-09-23: undocumented; the docs say only that the transcript "is written asynchronously and may lag" | Fixtures for present, absent and lagging; Phase 0 live check on current Claude Code |
 | Q-12-3 | Should `surf init` register the MCP server for Claude Code when hooks are installed? | Yes (for `surface_info`); the tool description discourages duplicate `route_context` calls | Count duplicate routes in decision logs (same session, < 5 s apart) |
 | Q-12-4 | Hook fast path: accept a slightly stale ack list (default) instead of full config validation? | Yes, unless `ack_words` appears in the raw TOML | Import-time measurements |
 | Q-12-5 | Shared-mode hook command on Windows without a POSIX shell | POSIX wrapper; Windows users use local mode | Windows user reports |
 | Q-12-6 | Should the snippet also tell agents to call `route_context` again on task change? | Yes, via the tool description only; the snippet stays spec wording | Pull-path sequence eval in a non-hook harness |
 | Q-12-7 | `surf-hook` as a second console script name: acceptable, or `surf _hook`? | `surf-hook` | Packaging review (Q-F1) |
+| Q-12-8 | The 2026-07-28 MCP spec is stateless (no `initialize` handshake, no MCP session / `Mcp-Session-Id`), so "`session_id` defaults to the MCP session" and "expire the `mcp-…` lease when the connection closes" (§4.5) need a new key | Key the default session by the stdio server process (one per host session) plus the explicit `session_id` argument; HTTP transport relies on the argument and idle expiry | Phase 4 review against SDK v2 |
+| Q-12-9 | Continuing-task engine latency: `same` = cold TLS (~0.2–0.3 s) + one request (0.1–0.5 s) against p50 ≤ 0.5 s | No change in v1; if Phase 0 measures p50 > 0.5 s, add a warm path (hook forwards to a running `surf mcp`/daemon holding a live connection) as v1.1 | Phase 0 measurement from the developers' location |

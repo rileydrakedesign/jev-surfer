@@ -107,7 +107,7 @@ Lines appear in the fixed order code, schema, docs, use, skip. Empty lines are o
 
 ### 4.2 Schema line with migrations
 
-The router doesn't select migrations for tables (09 §4.9); the note builder attaches them. The migration group is built as follows:
+The router doesn't select migrations for tables (09 §4.10); the note builder attaches them. The migration group is built as follows:
 
 1. For each rendered table, in line order, take the table card's `last_changed_in` migration, or `created_in` if it has never been altered (03 table card fields). This is the "migration that added `shipped_at`" in the spec §1.1 example: the latest schema change to a table is the most likely one to matter. Only `mig:` targets count; snapshot sources (`schema.prisma`, `schema.rb`) have no `mig:` card and are skipped.
 2. Add any `mig:` ids (or aliased `code:` migration ids) that are in the selection itself, in input order.
@@ -249,7 +249,7 @@ Any change to the header texts, labels, separators, fallback or low-confidence w
 | Capability both `use` and `skip` (caller bug) | `use` wins; `skip` entry dropped; warning logged |
 | Table in non-default schema | `billing.invoices` |
 | Selected table with no `mig:` history (Prisma/Rails snapshot source) | Table rendered, no migration group |
-| `low_confidence` but only capability lines render | No low-confidence line (09 §4.13) |
+| `low_confidence` but only capability lines render | No low-confidence line (09 §4.14) |
 | Caller passes >12 content items | Rendered subject to the line cap; no silent re-budgeting (budget is 09's job) |
 | Exception inside `render` | Pipeline's guard turns it into `status=error`, `note=None` (00 §5) |
 
@@ -291,4 +291,4 @@ Any change to the header texts, labels, separators, fallback or low-confidence w
 | Q-11-1 | Should items within a line be ordered by score (conveys priority) or alphabetically (easier to scan)? | Score order | Agent-behavior eval: first-opened file matches first pointer? |
 | Q-11-2 | Should the delta note re-issue the full list instead of additions (spec §25 Q4)? | Additions only | Sequence eval: recall of files opened on `extends` turns |
 | Q-11-3 | Should the note show directory pointers with a file count (`src/fulfillment/ (6 files)`)? | No | Precision/agent-behavior eval |
-| Q-11-4 | Header wording ("nothing is preloaded") — does it reduce agents over-trusting pointers? | Keep spec wording | Wording experiment in `eval/wordings.yaml` key `note` |
+| Q-11-4 | Header and label wording — does "nothing is preloaded" reduce over-trust, and do imperative `use:`/`skip:` labels trip harness injection defenses? | Keep spec wording until measured. Candidates (2026-09-24): factual labels ("probably relevant", "probably not needed") instead of `use:`/`skip:`, per Claude Code's hook docs ("write the text as factual statements rather than imperative system instructions"); an explicit "ignore if it doesn't fit" line, which TypeSafe's skill-suggestion cookbook used (it found confident wrong suggestions still broke 7 of 315 correct turns) | Wording experiment in `eval/wordings.yaml` key `note`, sequence eval |

@@ -29,7 +29,7 @@ Evaluation comes first. Phase 0 must **not** depend on the Phase 1 indexer; it u
 | P0.2 | Label 60–100 queries per repo following the protocol; 60/40 dev/test split; second labeler on 20 % | 16 | `.surf/eval/*.yaml` in each target |
 | P0.3 | Dataset models and loader with validation | 16 | `eval/dataset.py` |
 | P0.4 | Judge protocol + `jev` backend + `fixture` (record/replay) + `null` | 07 | `judge/base.py`, `jev.py`, `fixture.py`, `null.py` |
-| P0.5 | Confirm the Jev wire format against TypeSafe docs and isolate it in one adapter | 07 | `judge/jev.py` |
+| P0.5 | Implement the documented wire format (verified 2026-09-23) in one adapter; live conformance test with the latency curves (1–300 questions, HTTP/1.1 vs HTTP/2), noise and 429 measurements (07 §8.4) | 07, `jev-reference.md` | `judge/jev_wire.py`, `judge/jev.py` |
 | P0.6 | Bootstrap file-card builder (path + lang + line bucket only) | 16 | `eval/bootstrap_cards.py` |
 | P0.7 | A0 flat brute-force router | 16, 09 | `eval/baselines.py` |
 | P0.8 | Metrics incl. bootstrap and paired-bootstrap CIs; report skeleton (md + json) | 16 | `eval/metrics.py`, `report.py` |
@@ -67,14 +67,15 @@ Evaluation comes first. Phase 0 must **not** depend on the Phase 1 indexer; it u
 | P2.1 | Pipeline skeleton: `Deadline`, fail-open guard, `RouteTrace` | 09 | `route/pipeline.py` |
 | P2.2 | Skip rules | 09 | `route/skip.py` |
 | P2.3 | Path matching + suffix index + table-driven corpus | 08 | `route/pathmatch.py` |
-| P2.4 | Call 1 (needs_context, capabilities, small-repo content; continuity stubbed until Phase 4) | 09 | `route/call1.py` |
-| P2.5 | Directory walk: chunking, flattening, beam, dead-end guard, walk budget, speculative level 1 | 09 | `route/walk.py` |
+| P2.4 | Mode choice and call 1 (needs_context, capabilities; continuity stubbed until Phase 4) | 09 | `route/call1.py` |
+| P2.4a | Flat pass: flat set, token-balanced requests, speculative with call 1 (spec D14) | 09 §4.8 | `route/flat.py` |
+| P2.5 | Directory walk (above the flat budget): chunking, flattening, beam, dead-end guard, walk budget, speculative level 1 | 09 | `route/walk.py` |
 | P2.6 | Final pass | 09 | `route/final.py` |
 | P2.7 | Selection and budget (collapse, type diversity) | 09 | `route/select.py` |
 | P2.8 | Note builder (full note) | 11 | `route/note.py` |
-| P2.9 | Wordings file + first sweeps: A1, partial A8 | 16 | `eval/` |
+| P2.9 | Wordings file + first sweeps: A0 vs A4w by index size (sets `flat_max_tokens`), A1, partial A8 | 16 | `eval/` |
 
-**Exit:** A1 beats A0 on precision at comparable recall, **or** there's a documented reason to change approach.
+**Exit:** A0 vs A4w sets `router.flat_max_tokens` (spec D14), and A1 beats A0 on precision at comparable recall on repos above it, **or** there's a documented reason to change approach.
 
 ---
 

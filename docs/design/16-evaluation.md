@@ -221,12 +221,13 @@ class RowScore(BaseModel):
 Each ablation is a partial config (13-config keys) deep-merged over the effective project config.
 
 ```yaml
-A0: { router: { mode: flat } }                       # all content cards, chunked, final wording
-A1: { router: { expand: { enabled_kinds: [] } } }                 # walk only
-A2: { router: { expand: { enabled_kinds: [contains] } } }
-A3: { router: { expand: { enabled_kinds: [contains, co_change] } } }
-A4: {}                                               # full v1 = defaults
-A5: { index: { cards: { coupled_dirs: false } } }    # changes cards -> per-config catalog rebuild
+A0:  { router: { mode: flat } }                      # flat pass whatever the size: every leaf card, final wording
+A1:  { router: { mode: walk, expand: { enabled_kinds: [] } } }                 # walk only
+A2:  { router: { mode: walk, expand: { enabled_kinds: [contains] } } }
+A3:  { router: { mode: walk, expand: { enabled_kinds: [contains, co_change] } } }
+A4:  {}                                              # full v1 = defaults (flat within flat_max_tokens, walk above)
+A4w: { router: { mode: walk } }                      # full walk pipeline on every repo; with A0 sets flat_max_tokens
+A5:  { router: { mode: walk }, index: { cards: { coupled_dirs: false } } }   # changes cards -> per-config catalog rebuild
 A6: { judge: { backend: llm } }                      # uses router.thresholds.llm (tuned first, §4.8)
 A7: { judge: { backend: systemone-local } }          # uses router.thresholds.systemone-local
 A8:
@@ -240,7 +241,7 @@ These need three config keys that the spec lacks. They are defined in 13-config 
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `router.mode` | `"auto" \| "flat"` | `"auto"` | `auto` = small-repo or walk by `small_repo_cutoff`; `flat` = A0 |
+| `router.mode` | `"auto" \| "flat" \| "walk"` | `"auto"` | `auto` = flat or walk by `router.flat_max_tokens` (09 §4.5); `flat` = A0; `walk` = A1–A3, A4w, A5 |
 | `router.expand.enabled_kinds` | list[EdgeKind] | `[contains, co_change, schema_ref, defined_in, fk]` | Edge kinds used in expansion (§11.6 "tables from code" counts as `schema_ref`) |
 | `index.cards.coupled_dirs` | bool | `true` | Render `coupled_dirs` on dir cards |
 
@@ -405,11 +406,11 @@ Phase 0's exit is an A0 report on both repos' dev sets, and it comes before Phas
 5. Tables: a regex over `*.sql` in migration-like dirs for `CREATE TABLE [IF NOT EXISTS] [schema.]name` minus `DROP TABLE name` in filename order; card `"table {name}"`. No column parsing. Good enough for table labels to be satisfiable.
 6. No capabilities, no edges. Capability metrics report `n/a`; sequences are skipped (tag `phase0-skip` is implied).
 
-`eval/flat.py` `route_flat`: order content cards by id, chunk by `router.chunk_size`, `judge.ask_many` with the **final** wording, select `p ≥ router.thresholds.<backend>.final`, keep the top `router.max_pointers` by `(p desc, id asc)`. Trace: `mode="flat"`, `pool` = all, `final` = all scores, `budget_cut` = above-threshold beyond the cap. Attribution therefore only yields `final` or `budget`.
+`eval/flat.py` `route_flat`: order content cards by id, split by the judge's `RequestLimits` (07 §4.2), `judge.ask_many` with the **final** wording, select `p ≥ router.thresholds.<backend>.final`, keep the top `router.max_pointers` by `(p desc, id asc)`. Trace: `mode="flat"`, `pool` = all, `final` = all scores, `budget_cut` = above-threshold beyond the cap. Attribution therefore only yields `final` or `budget`.
 
-From Phase 2, A0 means `router.mode = flat` in the real pipeline with real cards. `RunReport.card_source` distinguishes the two; reports never compare a bootstrap-card run with a catalog run without a warning.
+From Phase 2, A0 means `router.mode = flat` in the real pipeline with real cards (the same flat pass that `auto` runs within budget, 09 §4.8). `RunReport.card_source` distinguishes the two; reports never compare a bootstrap-card run with a catalog run without a warning.
 
-Guard: A0 on a repo with more than `eval.a0_max_cards` content cards refuses without `--allow-large` (cost and rate limits: 5,000 cards is 125 requests per query).
+Guard: A0 on a repo with more than `eval.a0_max_cards` content cards refuses without `--allow-large` (cost and rate limits: 5,000 cards is ~430k input tokens, ~15 requests and ~$0.018 per query, and more than one second of the account's 250k tokens/s).
 
 ### 4.2 Runner (single queries)
 
@@ -711,6 +712,7 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | Directory prefix flipped (`code:` ↔ `doc:`) since labeling | Matched by path (F2); V14 warning |
 | Catalog changed since fixtures were recorded | Fixture misses → CI fails with the regen instruction (§4.10) |
 | Judge rate-limited mid-run | Rows become `judge-unavailable` (counted as misses, attributed `status`); run invalid above 5 % |
+| Live eval with `judge.provider` other than `typesafe` | Refused with a message: only TypeSafe direct pins `jev-1.13.0` exactly (OpenRouter pins the minor version, Vercel doesn't pin; 07 §3.2). Fixture replay of recordings made through TypeSafe is unaffected |
 | Jev returns different probabilities for the same request across runs | Within a run, `MemoJudge` makes them identical; across runs it's noise, covered by CIs and the paired-CI condition in nightly |
 | Sequence turn 0 routed `same` (impossible without a lease) | Scored as effective `new` |
 | Duplicate query across dev and test | V2 error |
@@ -733,7 +735,7 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | Bootstrap: 1,000 resamples × 15 metrics × 100 units | ≤ 1 s (per-unit partial sums) |
 | Live dev run, 100 items, A4, concurrency 1 | ≈ items × route p50 ≈ 3 min |
 | A8 coordinate sweep, live, 100 items | ≤ 19 × single run cost; memo and offline re-selection cut ~60 % in practice (estimate) |
-| A0 live, 2,000-card repo, 100 items | ~5,000 requests, ≈ $0.50, ≈ 10 min at concurrency 16 |
+| A0 live, 2,000-card repo, 100 items | ~700 requests, ~17.5M input tokens, ≈ $0.75; bound by the 250k tokens/s account limit (≥ 70 s of token budget), not by requests/min |
 
 ---
 
@@ -763,8 +765,8 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | Phase (spec §23) | Criterion from this doc |
 |---|---|
 | Phase 0 | `surf eval --cards bootstrap --ablate A0 --set dev --judge jev` produces `report.md`/`run.json` with recall/precision CIs and latency for both benchmark repos; the dataset validates; ≥ 60 queries per repo, 60/40 split, second-labeler agreement reported |
-| Phase 2 | Paired comparison A1 vs. A0 on dev: precision `better` with recall `no_difference` or `better`, or a documented reason |
-| Phase 3 | A2–A5 each have a paired comparison against its predecessor; `cross_layer` walk-bucket counts reported for A1 and A4 |
+| Phase 2 | Paired comparison A0 vs. A4w on dev, reported by index size: sets `router.flat_max_tokens` to the largest size where A0's precision is `no_difference` or `better` with recall `no_difference` or `better` (spec D14). A1 vs. A0 on repos above the budget: precision `better` with recall `no_difference` or `better`, or a documented reason |
+| Phase 3 | A2–A5 each have a paired comparison against its predecessor (all walk mode); `cross_layer` walk-bucket counts reported for A1 and A4w |
 | Phase 4 | `continuity_accuracy ≥ 0.9` on dev sequences |
 | Phase 5 | A6 and A7 reported with their own tuned thresholds; adversarial gates evaluated |
 | Phase 6 | Exactly one logged `--final` test run per release (plus any logged reruns); `bench/baselines/v<ver>.json` committed; §1.2 targets marked pass/fail |
@@ -790,13 +792,16 @@ Items with `must_f1 < 0.5` or differing category are listed for discussion; the 
 | D-16-10 | §17.5 A4 = A3 + schema refs | A4 also enables `defined_in` and `fk` | They're schema edges; A4 is "full v1" |
 | D-16-11 | §17.3 continuity accuracy | Scored on the **effective** continuity (post-threshold, skip-with-lease = `same`); raw Choice accuracy also reported | The effective value determines behavior |
 | D-16-12 | §17.7 PR fixture run (no gate specified) | Gates on fixture misses and on point regressions vs. a committed fixture baseline | Deterministic replay makes exact gates possible |
+| D-16-13 | §17.5: A0 flat brute force vs A1–A4 walk | A0 is the flat pass everywhere; A4 = defaults (flat within budget); new A4w forces the walk; A1–A3 and A5 force the walk | Flat is the default path below `flat_max_tokens` (spec D14), so the walk ablations must force walk mode to stay meaningful |
 
 **Open questions**
 
 | Id | Question | Proposed default | Decided by |
 |---|---|---|---|
 | Q-16-1 | Is 8 files the right directory-credit limit? | Tie to the collapse limit (`eval.dir_credit_max_files = 8`) | If 09 changes the collapse rule, follow it |
-| Q-16-2 | Live run-to-run noise vs. the 0.03 tolerance | Keep 0.03 but require the paired CI to say `worse` in nightly; measure noise with two live runs in Phase 0 | Phase 0 noise measurement |
+| Q-16-2 | Live run-to-run noise vs. the 0.03 tolerance | Keep 0.03 but require the paired CI to say `worse` in nightly; measure noise with two live runs in Phase 0. Evidence (2026-09-23): Jev is not bit-reproducible. TypeSafe's self-consistency cookbook reports a mean per-question SD of 0.0102 over 15 repeats, with single answers spanning 0.43–0.53 (that run varied a `uid` field in state, so it bounds rather than measures identical-request noise). Items near a threshold can flip between live runs | Phase 0 noise measurement (07 §8.4) |
+| Q-16-9 | TypeSafe's question-writing guidance suggests wordings v1 hasn't tried: one judgment per question; high value = yes; state paths referenced in backticks (`request`); structured `instructions` with the card as a named field; optional Noul `criteria` (`true`/`false` descriptions); explicit boundaries ("what it is not for") for similar options. Add them as candidates? | Yes, as **candidates** in `bench/wordings.yaml` for the §17.6 experiments, never as shipped wordings without a dev run. Structured candidates need object-valued `instructions` in the wordings schema and in 07 (Q-07-8) | Dev-set wording experiment (spec §17.6) |
+| Q-16-10 | TypeSafe cookbooks rank candidates with a **Choice** over the shortlist and walk hierarchies with one Choice per node plus beam search. v1 uses one Noul per candidate | Not in v1: Nouls are absolute and can all be low, which surf's selection needs; Choice is relative. Flat mode (spec D14) already removes most walk questions. v2 ablation idea only | After the v1 test report |
 | Q-16-3 | Question-level fixture fallback and replayed latency (`simulate_latency`) belong to 07's `judge/fixture.py` | Adopt both in 07 | Resolved: 07 D-07-3 |
 | Q-16-4 | The regen workflow runs PR code with the judge API key | Maintainer label only, same-repo branches only, a budget-capped eval-only key | Maintainer decision |
 | Q-16-5 | Test set is 24–40 queries per repo → recall CI width ≈ ±0.1; the 0.85 target is weakly tested | Headline test metric pooled across both repos (cluster bootstrap by item), per-repo also shown | User decision |

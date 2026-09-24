@@ -3,7 +3,7 @@
 **Status:** draft for review
 **Spec sections:** §11 (all), §8.5 (expansion use), §11.9 (budgets), §12.4 (lease interplay), §14.3 (low confidence), §17.4 (attribution), §18.1 (decision record)
 **Depends on:** 00-foundations, 04-graph-edges (`graph/expand.py`), 05-catalog-store (tree/edge lookups), 07-judge, 08-path-matching, 10-lease, 11-note, 13-config, 14-security-privacy (redaction), 15-observability
-**Code:** `surf/route/pipeline.py`, `skip.py`, `call1.py`, `walk.py`, `final.py`, `select.py`, `surf/route/state.py` (new: judge-state construction and truncation), `surf/route/trace.py` (new: `RouteTrace`), `surf/route/wordings.py` (new: shipped wording constants)
+**Code:** `surf/route/pipeline.py`, `skip.py`, `call1.py`, `flat.py` (new: flat pass), `walk.py`, `final.py`, `select.py`, `surf/route/state.py` (new: judge-state construction and truncation), `surf/route/trace.py` (new: `RouteTrace`), `surf/route/wordings.py` (new: shipped wording constants)
 
 ---
 
@@ -11,7 +11,7 @@
 
 Given a prompt, produce a `RouteResult` (00 §3): a small selection of content surfaces and capability decisions, a note (via 11), a lease update (via 10), a decision record (via 15) and, on request, a full trace. It is the only component that sequences judge calls.
 
-**In scope:** pipeline state machine, deadlines, skip rules, request construction, call 1, speculative walk, walk, expansion invocation, pool assembly, final pass, selection, status and low-confidence determination, `RouteTrace`.
+**In scope:** pipeline state machine, deadlines, skip rules, mode choice (flat or walk), request construction, call 1, flat pass, speculative requests, walk, expansion invocation, pool assembly, final pass, selection, status and low-confidence determination, `RouteTrace`.
 **Out of scope:** path extraction (08), expansion scoring math (04), lease storage and union rules (10), note text (11), wording and threshold values (tuned in 16).
 
 ---
@@ -51,8 +51,14 @@ def truncate_head_tail(text: str, max_tokens: int) -> str
 
 # route/call1.py
 def build_call1(state: dict[str, str], *, lease_exists: bool, caps: list[Card],
-                content: list[Card] | None, cfg: RouterConfig) -> list[JudgeRequest]
+                limits: RequestLimits) -> list[JudgeRequest]
 def interpret_call1(outcomes: list[JudgeResponse | JudgeError], ...) -> Call1Outcome
+
+# route/flat.py
+def choose_mode(catalog: CatalogReader, cfg: RouterConfig) -> Literal["flat", "walk"]   # §4.5
+def build_flat(cards: list[Card], path_ids: list[SurfaceId], state: dict[str, str],
+               limits: RequestLimits, cfg: RouterConfig) -> list[JudgeRequest]           # §4.8
+def interpret_flat(outcomes: list[JudgeResponse | JudgeError], ...) -> FinalOutcome
 
 # route/walk.py
 class Walker:
@@ -95,14 +101,13 @@ class Call1Outcome(BaseModel):
     override: Literal["no_lease", "low_conf", "stale", "path_hits_outside_lease"] | None
     needs_context: float | None
     caps: dict[SurfaceId, float]              # missing caps absent
-    content: dict[SurfaceId, float]           # small-repo mode only
     failed_chunks: list[int]
 
 class WalkCandidate(BaseModel):
     id: SurfaceId; score: float
     via: Literal["judged", "flattened", "dir_admit", "guard", "deadline_admit", "dir_hit_flatten"]
 
-class Tier(IntEnum): PATH_HIT = 1; WALK = 2; AMBIGUOUS_PATH = 3; EXPANSION = 4
+class Tier(IntEnum): PATH_HIT = 1; WALK = 2; AMBIGUOUS_PATH = 3; EXPANSION = 4   # flat mode: hits tier 1, all else tier 2
 
 class PoolEntry(BaseModel):
     id: SurfaceId; tier: Tier; pre_score: float
@@ -116,19 +121,21 @@ class FinalOutcome(BaseModel):
 
 class LowConfidence(StrEnum):
     DEAD_END_GUARD = "dead_end_guard"; WALK_DEADLINE = "walk_deadline"
-    FINAL_PARTIAL = "final_partial"; CALL1_CONTENT_PARTIAL = "call1_content_partial"
+    FINAL_PARTIAL = "final_partial"          # also: a flat-pass request failed
     UNCALIBRATED = "uncalibrated_thresholds"
 ```
 
 ### 3.2 Judge state keys
 
-| State key | Call 1 | Walk | Final | Source / limit |
-|---|---|---|---|---|
-| `request` | ✓ | ✓ | ✓ | redacted prompt, head+tail ≤ `router.request_max_tokens` (1,500) |
-| `project` | ✓ | ✓ | ✓ | `project.descriptor` from config, else the auto-derived descriptor stored in `meta.json` (02 §4.10), ≤ 200 chars |
-| `previous_task` | ✓ if lease | – | – | lease `task_request`, redacted, ≤ `router.context_max_tokens` (300) |
-| `last_message` | ✓ if given | – | – | `RouteRequest.previous_message`, redacted, ≤ 300 tokens |
-| `location` | – | ✓ | – | breadcrumb `root › src › services`; schema root renders as `root › database schema` |
+| State key | Call 1 | Flat | Walk | Final | Source / limit |
+|---|---|---|---|---|---|
+| `request` | ✓ | ✓ | ✓ | ✓ | redacted prompt, head+tail ≤ `router.request_max_tokens` (1,500) |
+| `project` | ✓ | ✓ | ✓ | ✓ | `project.descriptor` from config, else the auto-derived descriptor stored in `meta.json` (02 §4.10), ≤ 200 chars |
+| `previous_task` | ✓ if lease | – | – | – | lease `task_request`, redacted, ≤ `router.context_max_tokens` (300) |
+| `last_message` | ✓ if given | – | – | – | `RouteRequest.previous_message`, redacted, ≤ 300 tokens |
+| `location` | – | – | ✓ | – | breadcrumb `root › src › services`; schema root renders as `root › database schema` |
+
+State stays small on purpose (≤ ~2k tokens): Jev's accuracy falls with irrelevant **state**, while candidates are questions judged independently against it (`docs/jev-reference.md` §9–10; spec principle 5). Content requests (flat, walk, final) never carry call 1's continuity keys (spec D16).
 
 Keys are omitted (not empty) when absent. Key order is fixed as listed (fixture keys are order-independent anyway, 07 §4.10).
 
@@ -141,7 +148,7 @@ Keys are omitted (not empty) when absent. Key order is fixed as listed (fixture 
 | call 1 | `continuity` | Choice `same`/`extends`/`new` | `continuity` (+ option descriptions) |
 | call 1 | `needs_context` | Noul | `needs_context` |
 | call 1 | `cap:<id>` | Noul | `capability` |
-| call 1 (small repo) | `file:<id>` | Noul | `walk` |
+| flat | `f:<id>` | Noul | `final` |
 | walk | `w:<id>` | Noul | `walk` |
 | final | `f:<id>` | Noul | `final` |
 
@@ -168,13 +175,18 @@ class WalkTraceT(BaseModel):
     frontier_cut: list[SurfaceId]           # dropped by max_frontier
     latency_ms: int
 
+class FlatTraceT(BaseModel):
+    est_tokens: int                         # flat-pass estimate used for the mode choice (§4.5)
+    requests: int
+    speculative: Literal["used", "discarded", "off"]
+    latency_ms: int
+
 class Call1Trace(BaseModel):
     needs_context: float | None
     continuity: ChoiceA | None              # raw
     continuity_effective: Continuity
     override: Literal["no_lease", "low_conf", "stale", "path_hits_outside_lease"] | None
     caps: dict[SurfaceId, float]
-    content: dict[SurfaceId, float]         # small mode only
     failed_chunks: list[int]; latency_ms: int
 
 class PathHitT(BaseModel):
@@ -185,7 +197,7 @@ class ExpansionT(BaseModel):
 
 class PoolItem(BaseModel):                  # pre-truncation, rank order; also everything select() needs
     id: SurfaceId; type: SurfaceType
-    source: Literal["path_hit", "walk", "flatten", "expansion", "small", "ambiguous_path", "dir_hit"]
+    source: Literal["path_hit", "walk", "flatten", "expansion", "flat", "ambiguous_path", "dir_hit"]
     rank: int; pre_score: float
     path_hit_rank: int | None               # 08 order, None if not a hit
     parent: SurfaceId | None                # for collapse / redundancy
@@ -194,7 +206,8 @@ class PoolItem(BaseModel):                  # pre-truncation, rank order; also e
 
 class RouteTrace(BaseModel):
     route_id: str; status: RouteStatus
-    mode: Literal["small", "walk", "flat"]
+    mode: Literal["flat", "walk"]
+    flat: FlatTraceT | None
     low_confidence: list[LowConfidence]
     skip_reason: SkipReason | None
     call1: Call1Trace | None
@@ -205,7 +218,7 @@ class RouteTrace(BaseModel):
     pool: list[PoolItem]                    # before truncation
     pool_cut: list[SurfaceId]               # removed by max_candidates
     excluded_by_lease: list[SurfaceId]      # extends only
-    final: dict[SurfaceId, float]; final_unjudged: list[SurfaceId]; final_latency_ms: int | None
+    final: dict[SurfaceId, float]; final_unjudged: list[SurfaceId]; final_latency_ms: int | None   # flat mode: the flat-pass answers
     above_threshold: list[SurfaceId]        # priority order
     budget_cut: list[SurfaceId]
     collapsed: dict[SurfaceId, list[SurfaceId]]
@@ -221,7 +234,7 @@ class RouteTrace(BaseModel):
 
 Raw prompt text never enters the trace outside `explain` (raw path mentions in `ExplainExtras`), so the decision record can be built from it safely.
 
-**Offline re-selection.** `select(trace, params)` reads only `trace.pool`, `trace.final`, `trace.final_unjudged`, `trace.call1` and `trace.path_hits`, so eval can sweep `final`, `path_hit_floor`, `max_pointers`, `cap_use`, `cap_skip` and the collapse parameters on stored traces without judge calls (16 §4.8). Raising `needs_context` offline is emulated by treating rows with `call1.needs_context < τ` and no path hits as `no-context`; lowering it isn't exact (the walk never ran) and 16 must not sweep downward offline.
+**Offline re-selection.** `select(trace, params)` reads only `trace.pool`, `trace.final`, `trace.final_unjudged`, `trace.call1` and `trace.path_hits`, so eval can sweep `final`, `path_hit_floor`, `max_pointers`, `cap_use`, `cap_skip` and the collapse parameters on stored traces without judge calls (16 §4.8). Raising `needs_context` offline is emulated by treating rows with `call1.needs_context < τ` and no path hits as `no-context`; lowering it isn't exact (the walk never ran) and 16 must not sweep downward offline. Flat-mode traces hold every leaf's strict answer, so `final` sweeps on them are exact and the gate can be swept both ways.
 
 **Attribution.** 16 §4.6 owns the bucket rules (status, lease, gate, budget, final, truncation, walk sub-reasons). The trace provides every input: `budget_cut`, `final`, `pool_cut`, `walk.nodes[*].action`, `walk.depth_cap_hit`, `walk.deadline_hit` and rejected expansions.
 
@@ -238,14 +251,16 @@ stateDiagram-v2
     Guard --> Done_index_missing: no catalog
     Guard --> Done_unavailable: judge.availability() not ok
     Guard --> PathMatch
-    PathMatch --> Call1: fire call 1 (+ speculative walk L1 if walk mode)
+    PathMatch --> Call1: fire call 1 + (flat pass | speculative walk L1), one wave
     Call1 --> Done_unavailable: chunk 0 failed
     Call1 --> Done_lease_reuse: effective continuity = same
-    Call1 --> Done_no_context: needs_context < τ and no path hits
-    Call1 --> Pool: needs_context < τ with path hits (walk skipped)
-    Call1 --> SmallRepo: small-repo mode
+    Call1 --> Flat: flat mode (await flat pass)
+    Flat --> Done_deadline: route deadline before any flat answer
+    Flat --> Done_unavailable: all flat requests failed (non-deadline)
+    Flat --> Select
+    Call1 --> Done_no_context: walk mode, needs_context < τ and no path hits
+    Call1 --> Pool: walk mode, needs_context < τ with path hits (walk skipped)
     Call1 --> Walk: walk mode (consume speculative L1)
-    SmallRepo --> Expand
     Walk --> Expand
     Expand --> Pool
     Pool --> Done_no_candidates: pool empty
@@ -269,7 +284,7 @@ stateDiagram-v2
 | routed | `routed` | full or delta note | `commit(continuity, content, caps)` |
 | any exception | `error` | none | untouched |
 
-`router.mode = "flat"` (ablation A0, 16 §3.5) replaces the whole call-1-then-walk branch after call 1 with: every content card from `catalog.content_cards()` (same card set as small-repo content), chunked by `chunk_size`, final wording, then `select`. Trace `mode="flat"`, `pool` = all cards.
+`router.mode` forces a mode for ablations (16 §3.5): `flat` (A0) runs the flat pass whatever its size; `walk` (A1–A3, A4w) walks every repo; `auto` (default) chooses by budget (§4.5).
 
 Every terminal writes one decision record. The whole body of `route_async` is inside the fail-open guard (00 §5); per-stage guards also wrap path matching and expansion so a bug there degrades that stage (empty result) instead of the route.
 
@@ -277,7 +292,7 @@ Every terminal writes one decision record. The whole body of `route_async` is in
 
 - `route_deadline = Deadline(router.route_deadline_ms = 3000)`, started at `route_async` entry (adapter process start-up is outside it; 12 reports it separately).
 - `walk_deadline = route_deadline.sub(router.walk_deadline_ms = 2000)`, measured **from the same start**, because walk level 1 starts at t≈0 speculatively. This leaves ≥ 1,000 ms for expansion and the final pass.
-- Call 1 and the final pass use `route_deadline`; walk levels use `walk_deadline`. Each judge request's timeout is `min(judge.timeout_ms, deadline.remaining_ms())` (07 §4.5).
+- Call 1, the flat pass and the final pass use `route_deadline`; walk levels use `walk_deadline`. Each judge request's timeout is `min(judge.timeout_ms, deadline.remaining_ms())` (07 §4.5).
 - A new walk level starts only if `walk_deadline.remaining_ms() ≥ router.min_level_ms` (400). The final pass starts only if `route_deadline.remaining_ms() ≥ router.min_final_ms` (300); otherwise status `deadline`.
 
 ### 4.3 Step 0: guard and skip rules (`skip.py`)
@@ -298,37 +313,59 @@ Order:
 3. **Directory hits.** A dir hit enters the pool at tier 1 as the dir itself. If its `files_total ≤ flatten_at`, its files also become walk-tier candidates with score `flatten_factor × strength` (`via="dir_hit_flatten"`).
 4. **Out-of-lease hits** (used in §4.6): hits whose path is neither in the lease's content nor under a leased directory (compared by path, F2).
 
-### 4.5 Step 2: call 1 (`call1.py`)
+### 4.5 Mode and step 2: call 1 (`flat.py`, `call1.py`)
 
-**Questions**, in order: `continuity` (if a lease exists), `needs_context` (always, also in small-repo mode), `cap:<id>` for every capability card (sorted by id), then in small-repo mode `file:<id>` for every non-directory content card: `code_file`, `doc_file`, `db_table` excluding external-stub tables (not `code_dir`/`doc_dir`/`db:*`/`mig:`, not path-hit files; order by churn rank desc, then id).
+**Mode** (decided before any judge call, so the content requests can go out with call 1):
 
-**Chunking.** `n` questions → `k = ceil(n / chunk_size)` balanced chunks (07 §4.2). `continuity` and `needs_context` are in chunk 0 only. Every chunk carries the full call-1 state (§3.2), so capability judgments on "ok, now fix it" still see the previous task. All chunks go out in one `ask_many`, concurrently with the speculative walk (§4.7).
+```
+flat_set   = catalog.flat_cards()          # 05: code_file, doc_file, db_table minus external stubs; not dirs, db:*, mig:
+est_tokens = catalog.flat_card_tokens()    # 05: Σ approx_tokens(card) over flat_set, stored at index time
+             + len(flat_set) × FLAT_QUESTION_OVERHEAD (25: wording + JSON)
+             + n_requests × (approx_tokens(state) + REQUEST_OVERHEAD (300))
+mode = "flat" if est_tokens ≤ router.flat_max_tokens else "walk"      # router.mode = auto
+```
+
+The budget is in tokens because the binding limit is the account-wide token rate (250k tokens/s for `jev-1.13`, shared by every session and eval run), not request count or price. 40,000 tokens ≈ 450 file cards ≈ $0.0017 and ≤ 16 % of one second's account budget (spec D14, `docs/architecture-review.md` §3.1).
+
+**Call 1 questions**, in order: `continuity` (if a lease exists), `needs_context` (always; it gates only in walk mode, and is recorded in flat mode for gate evaluation, Q-09-14), `cap:<id>` for every capability card (sorted by id). Content is never asked in call 1 (spec D16).
+
+**Chunking.** Split only when the backend's per-request limits (07 §4.2, `RequestLimits`) are exceeded, into token-balanced chunks. `continuity` and `needs_context` are in chunk 0 only. Every chunk carries the full call-1 state (§3.2), so capability judgments on "ok, now fix it" still see the previous task. All chunks go out in one `ask_many`, in the same wave as the flat pass or the speculative walk level 1 (§4.7).
 
 **Interpretation.**
-- Chunk 0 failed → `judge-unavailable`, cancel speculation.
-- Another chunk failed → its caps/content keys are missing (unmentioned caps; content items not candidates). If content keys were lost → `CALL1_CONTENT_PARTIAL`.
+- Chunk 0 failed → `judge-unavailable`, discard speculation.
+- Another chunk failed → its caps are missing (unmentioned).
 
 ### 4.6 Decision after call 1
 
 Evaluated in order; `τ` = thresholds:
 
 1. **Effective continuity.** No lease → `new` (`override="no_lease"`). Else raw choice, then: `same` with `confidence < τ.continuity_min_conf` → `extends` (`low_conf`); `same` with a stale lease → `extends` (`stale`); `same` with ≥ 1 out-of-lease path hit → `extends` (`path_hits_outside_lease`, D-09-5: a stack trace pasted mid-task must be routed).
-2. `same` → cancel speculation; `lease-reuse`.
-3. `needs_context < τ.needs_context` and no path hits (tier-1 hits; ambiguous candidates don't count) → cancel speculation; `no-context`.
-4. `needs_context < τ.needs_context` with path hits → cancel speculation; skip the walk; pool = hits + ambiguous candidates + expansion (D-09-6).
-5. Small-repo mode (`catalog.content_card_count() ≤ router.small_repo_cutoff`; the count excludes `mig:` cards and external-stub tables, per 02/05) → candidates = `{id: p for file:<id> with p ≥ τ.walk}` (`via="judged"`). Dead-end guard as in §4.8 step 5 over these answers. Go to expansion.
-6. Walk mode → §4.8 with the speculative level 1.
+2. `same` → discard speculation; `lease-reuse`.
+3. Flat mode → await the flat pass (§4.8); selection reads its answers. No gate, walk, expansion or final pass: "nothing ≥ τ.final" is the gate (`no-candidates`).
+4. Walk mode, `needs_context < τ.needs_context` and no path hits (tier-1 hits; ambiguous candidates don't count) → discard speculation; `no-context`.
+5. Walk mode, `needs_context < τ.needs_context` with path hits → discard speculation; skip the walk; pool = hits + ambiguous candidates + expansion (D-09-6).
+6. Walk mode → §4.9 with the speculative level 1.
 
 Capability decisions (all non-`same` outcomes): `use` = `p ≥ τ.cap_use`, sorted by p desc, first `router.max_caps_use` (6); `not_needed` = `p ≤ τ.cap_skip`, sorted by p asc, first `router.max_caps_skip` (10). Everything else unmentioned.
 
-### 4.7 Speculative walk level 1
+### 4.7 Speculative content requests
 
-- Fired only in walk mode when `router.speculative_walk` is true, right after path matching, as an `asyncio.Task` running `walker.start_level([ROOT], depth=0)` with the walk state (which never depends on call 1, §3.2).
-- The **requests** run speculatively; **selection** for level 1 (threshold, beam, dead-end guard) runs only after call 1 returns, because the guard reads `needs_context` (D-09-3).
-- Discard paths (§4.6 rows 2–4, call 1 failure) call `task.cancel()`; the ledger records cancelled requests (07 §4.4). Trace `speculative="discarded"`.
-- Speculation off → level 1 is started after call 1, same code path.
+- With `router.speculative` true, the content requests go out right after path matching, in the same wave as call 1, as an `asyncio.Task`: the **flat pass** in flat mode, **walk level 1** (`walker.start_level([ROOT], depth=0)`) in walk mode. Their state never depends on call 1 (§3.2), so they are valid before continuity is known. Without a lease, call 1 can't say `same`, so the requests are never wasted.
+- They stay separate requests, never merged into call 1: call 1's state carries `previous_task`, which is irrelevant state for content judgments on a new task (spec D16).
+- In walk mode, **selection** for level 1 (threshold, beam, dead-end guard) runs only after call 1 returns, because the guard reads `needs_context` (D-09-3).
+- Discard paths (§4.6 rows 2, 4, 5 and call 1 failure) call `task.cancel()`; the ledger records the requests as cancelled with estimated tokens (07 §4.4). Trace `speculative="discarded"`. A discarded flat pass costs at most `flat_max_tokens` (~$0.0017).
+- Speculation off → the content requests start after call 1, same code path.
 
-### 4.8 Step 3: the walk (`walk.py`)
+### 4.8 Step 3a: flat pass (`flat.py`)
+
+- **Questions:** one `f:<id>` Noul with the **final** wording for every card in `flat_set`, plus every path-hit id not already in it (directory hits, `mig:` hits after aliasing, §4.4), ordered by churn rank desc then id. Ambiguous path candidates are already in `flat_set`.
+- **State:** `{request, project}`, the final-pass state.
+- **Requests:** token-balanced chunks within `RequestLimits` (07 §4.2; `jev`: ≤ 30k estimated tokens), all in one `ask_many`, each repeating the state.
+- **Result:** `trace.final` = the answers; `trace.pool` = every flat question (path hits tier 1 in 08 order, the rest tier 2 by p desc), with no `max_candidates` truncation (everything was judged). On `extends`, leased ids are dropped after the answers arrive (D-09-15).
+- **Failures:** a failed request → its ids `unjudged`, `FINAL_PARTIAL`. All failed: after the route deadline → `deadline`; otherwise `judge-unavailable`.
+- Then selection (§4.13). Walk, expansion and the final pass don't run: every leaf already has a strict judgment, so expansion could only re-ask questions already answered.
+
+### 4.9 Step 3b: the walk (`walk.py`, walk mode)
 
 ```python
 async def run(first, needs_context, *, excluded, has_path_hits):
@@ -378,7 +415,7 @@ async def run(first, needs_context, *, excluded, has_path_hits):
 7. **Deadline / failure.** If the walk deadline stops the walk, or all chunks of a node fail, the unexpanded frontier nodes are admitted as directory candidates with `p_cum` and the route is marked `WALK_DEADLINE` (for deadline) — best-so-far per spec §11.5. `db:*` and `root:` are never admitted as candidates.
 8. **Frontier cap.** At most `max_frontier` (12) nodes per level, highest `p_cum` first (ties by id); the rest are traced in `frontier_cut` (bounds the request fan-out at deep levels; D-09-10).
 
-### 4.9 Step 4: graph expansion
+### 4.10 Step 4: graph expansion (walk mode)
 
 ```python
 anchors = {h.id: h.strength for h in path_hits} | {c.id: c.score for c in walk_cands.values()}
@@ -392,9 +429,9 @@ hits, rejected = graph.expand.expand(anchors, ctx.catalog, cfg.expand,       # 0
 - Migrations reach the pool via `defined_in` only from table anchors (a table hit, or tables from a flattened schema root). The "migration that added `shipped_at`" line in the note is attached by the note builder from `defined_in` edges of selected tables (11), not by the router (Q-09-7).
 - Ambiguous path candidates are not anchors.
 
-### 4.10 Pool assembly and truncation
+### 4.11 Pool assembly and truncation (walk mode)
 
-1. Collect entries: tier 1 path hits (08 order), tier 2 walk / small-repo candidates (score desc), tier 3 ambiguous path candidates (08 order), tier 4 expansion (expand_score desc). Ties by id.
+1. Collect entries: tier 1 path hits (08 order), tier 2 walk candidates (score desc), tier 3 ambiguous path candidates (08 order), tier 4 expansion (expand_score desc). Ties by id.
 2. Apply the `code:` → `mig:` alias mapping to every entry (§4.4.1; `edges_from(id, [ALIAS])`).
 3. Dedupe by id, keeping the lowest tier (and its score).
 4. On `extends`, mark entries already in the lease content `excluded="lease"` and drop them (they can't be additions; D-09-15). They still served as expansion anchors.
@@ -402,15 +439,15 @@ hits, rejected = graph.expand.expand(anchors, ctx.catalog, cfg.expand,       # 0
 6. Keep the first `max_candidates` (40); the rest stay in the trace with `truncated=True`.
 7. Empty pool → `no-candidates`.
 
-### 4.11 Step 5: final pass (`final.py`)
+### 4.12 Step 5: final pass (`final.py`, walk mode)
 
 - State `{request, project}`; one `f:<id>` Noul per pool entry with the final wording and the entry's card (files, dirs, tables, migrations all have cards).
-- **Request split rule (defines "two in parallel if split for mixed types").** Estimate tokens of the request (07 §4.8). If ≤ `router.final_max_request_tokens` (6,000): one request. Otherwise two requests in parallel: group A = `code_*`/`doc_*` entries, group B = `db_table`/`db_migration`; if either group is empty or still over budget, split the pool into two balanced halves in rank order instead. Both requests repeat the state (D-09-12, Q-09-3).
+- **One request** (D-09-12): 40 cards of ≤ 150 tokens fit well within `RequestLimits`; the judge splits only if they're exceeded (07 §4.2). Question count barely moves Jev latency (Q-09-3), so there is no split by type.
 - Timeout from `route_deadline`. All requests failed with `DEADLINE`/timeout after the deadline → `deadline`; all failed otherwise → `judge-unavailable`. One of two failed → its ids are `unjudged` and the route is `FINAL_PARTIAL`.
 
-### 4.12 Step 6: selection (`select.py`)
+### 4.13 Step 6: selection (`select.py`)
 
-`select(trace, params)` is a pure function (16 §4.8, Q-16-8). Before calling it the pipeline has written everything it needs into the trace: `pool` items carry `type`, `path_hit_rank`, `parent`, `parent_direct_files` and `ancestors` (looked up from the catalog once, during pool assembly); `final`/`final_unjudged` hold the final-pass result; `call1.caps` the capability probabilities. Steps 1–5 below use only those fields; the internal `PoolEntry` (with `tier`) is projected to `PoolItem` for the trace.
+`select(trace, params)` is a pure function (16 §4.8, Q-16-8), identical in both modes. Before calling it the pipeline has written everything it needs into the trace: `pool` items carry `type`, `path_hit_rank`, `parent`, `parent_direct_files` and `ancestors` (looked up from the catalog once, during pool assembly); `final`/`final_unjudged` hold the final-pass (or flat-pass) result; `call1.caps` the capability probabilities. Steps 1–5 below use only those fields; the internal `PoolEntry` (with `tier`) is projected to `PoolItem` for the trace.
 
 1. **Eligibility.** Non-path-hit entries: `p ≥ τ.final`. Path hits: `p ≥ τ.path_hit_floor` (0.2). Unjudged entries (including unjudged path hits) are not eligible (consistent with Q-F7: nothing un-judged reaches the note).
 2. **Redundancy.** If a directory and any of its descendants are both eligible, drop the directory (the file is more specific; a dir label is still satisfied by the file).
@@ -422,15 +459,27 @@ hits, rejected = graph.expand.expand(anchors, ctx.catalog, cfg.expand,       # 0
 
 Then `leases.commit(session_id, continuity, request=redacted_prompt, selection, index_head)` returns the full lease selection and the delta (10 owns union order and the 12-pointer cap on `extends`). The note builder (11) gets `(status, continuity, selection, delta, low_confidence)`.
 
-### 4.13 Low confidence
+### 4.14 Low confidence
 
-`RouteResult.low_confidence = bool(reasons)` where reasons ⊆ {`DEAD_END_GUARD`, `WALK_DEADLINE`, `FINAL_PARTIAL`, `CALL1_CONTENT_PARTIAL`, `UNCALIBRATED`}. The note builder adds the spec §14.3 line only when the note has content pointers. Reasons go to the decision record and trace; the lease doesn't store them (a later `same` reuses silently).
+`RouteResult.low_confidence = bool(reasons)` where reasons ⊆ {`DEAD_END_GUARD`, `WALK_DEADLINE`, `FINAL_PARTIAL`, `UNCALIBRATED`}. The note builder adds the spec §14.3 line only when the note has content pointers. Reasons go to the decision record and trace; the lease doesn't store them (a later `same` reuses silently).
 
-### 4.14 Latency plan (walk repo, new task)
+### 4.15 Latency plan (new task)
+
+**Flat mode** (index within `flat_max_tokens`):
 
 | t (ms, typical) | Event |
 |---|---|
-| 0–15 | skip, path matching, catalog open |
+| 0–15 | skip, path matching, catalog open, mode choice |
+| 15 | call 1 + flat-pass requests fired together over one HTTP/2 connection (07 §4.4) |
+| ~250–500 | answered (cold TLS ~200–300 ms + Jev ~100–300 ms); select, lease, note, decision record (≤ 10 ms) |
+
+One round trip. Jev latency barely grows with question count per the docs; the Phase 0 curve at 100/300 questions per request confirms (07 §8.4).
+
+**Walk mode** (above the budget):
+
+| t (ms, typical) | Event |
+|---|---|
+| 0–15 | skip, path matching, catalog open, mode choice |
 | 15 | call 1 chunks + speculative L1 chunks fired together |
 | ~400 | both answered; §4.6 decision; L1 selection |
 | ~400 | L2 fired (if any frontier) |
@@ -438,7 +487,7 @@ Then `leases.commit(session_id, continuity, request=redacted_prompt, selection, 
 | ~810 | final pass fired |
 | ~1,200 | final answered; select, lease, note, decision record (≤ 10 ms) |
 
-Three sequential round trips (spec §11.9: 2–4).
+Three sequential round trips (spec §11.9: 2–4). The ~400 ms per round trip above is conservative: TypeSafe documents ~100 ms for most queries and its cookbooks measure 90–310 ms, so cold TLS set-up (07 §4.5) and hook start-up (12) are the larger costs. Phase 0 replaces these numbers with measured ones.
 
 ---
 
@@ -448,10 +497,10 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `small_repo_cutoff` | int | 60 | against `catalog.content_card_count()` (02/05 definition: excludes `mig:` and external stubs) |
+| `flat_max_tokens` | int | 40000 | flat pass instead of the walk when its estimate fits (§4.5; spec D14) |
 | `flatten_at` | int | 40 | |
 | `flatten_factor` | float | 0.9 | |
-| `chunk_size` | int | 40 | ≤ `judge.max_questions_per_request` |
+| `chunk_size` | int | 40 | walk children per request; ≤ the backend's question cap |
 | `beam_max` | int | 6 | per node |
 | `beam_min` | int | 1 | dead-end guard width (missing from the spec's config sample) |
 | `max_frontier` | int | 12 | new |
@@ -460,15 +509,14 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 | `max_pointers` | int | 12 | |
 | `max_caps_use` / `max_caps_skip` | int | 6 / 10 | new |
 | `collapse_min_files` / `collapse_max_dir_files` | int | 4 / 8 | |
-| `mode` | `auto` \| `flat` | `auto` | 16 §3.5 (A0) |
+| `mode` | `auto` \| `flat` \| `walk` | `auto` | forced modes for ablations (16 §3.5: A0 flat; A1–A3, A4w walk) |
 | `expand.*` | | | owned by 04 §5 (`max_per_anchor` 8, `max_total` 40, `enabled_kinds`, `kind_factors`, `index_names`) |
 | `walk_deadline_ms` | int | 2000 | replaces the walk meaning of `deadline_ms` |
 | `route_deadline_ms` | int | 3000 | replaces `[router] deadline_ms`; 13 accepts `deadline_ms` as a deprecated alias |
 | `min_level_ms` / `min_final_ms` | int | 400 / 300 | |
-| `speculative_walk` | bool | true | |
+| `speculative` | bool | true | flat pass / walk L1 in the same wave as call 1 (§4.7); `speculative_walk` accepted as a deprecated alias |
 | `request_max_tokens` | int | 1500 | |
 | `context_max_tokens` | int | 300 | `previous_task`, `last_message` |
-| `final_max_request_tokens` | int | 6000 | split rule §4.11 |
 | `skip.ack_max_words` | int | 4 | |
 | `skip.ack_words` | list[str] | §4.3 | |
 | `wording.{walk,final,capability,continuity,needs_context}` | str | `route/wordings.py` constants (= `shipped` in 16's wordings.yaml) | `{card}` placeholder; override for experiments only |
@@ -479,12 +527,12 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 
 | Key | Default | Used in |
 |---|---|---|
-| `walk` | 0.35 | walk, small-repo content |
+| `walk` | 0.35 | walk |
 | `walk_guard` | 0.50 | dead-end guard `needs_context` minimum (new; was a literal in spec pseudocode) |
-| `final` | 0.60 | selection |
+| `final` | 0.60 | selection (final pass and flat pass) |
 | `path_hit_floor` | 0.20 | selection |
 | `cap_use` / `cap_skip` | 0.60 / 0.15 | capabilities |
-| `needs_context` | 0.25 | gate |
+| `needs_context` | 0.25 | gate (walk mode only) |
 | `continuity_min_conf` | 0.60 | continuity |
 | `expand` | 0.30 | expansion (graph score, kept here per spec) |
 
@@ -498,13 +546,17 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 | Lease exists, stale, call 1 says `same` | `extends` |
 | `same` + pasted trace with out-of-lease hits | `extends`; walk + union; delta note |
 | `same` + hits all inside the lease | `lease-reuse` |
-| needs_context low, no hits | `no-context`; speculation cancelled; caps lines |
-| needs_context low, path hits | walk skipped; hits → final pass |
+| Walk mode, needs_context low, no hits | `no-context`; speculation discarded; caps lines |
+| Walk mode, needs_context low, path hits | walk skipped; hits → final pass |
+| Flat mode, needs_context low | recorded only; selection decides (`no-candidates` if nothing ≥ τ.final) |
 | needs_context missing (chunk 0 answered but key missing) | treated as 1.0 for gating, guard disabled; trace notes it |
 | Continuity missing (key missing) | `extends` |
 | Call 1 chunk 0 fails | `judge-unavailable`, no note |
 | Call 1 cap chunk fails | those caps unmentioned; route continues |
-| Small repo, 60 content + 30 caps + 2 = 92 questions | 3 balanced chunks (31/31/30) in parallel; state repeated; continuity/needs_context in chunk 0 |
+| Flat mode, 400 file cards + 30 caps | call 1: one request (32 questions); flat pass: two token-balanced requests (~200 each); one wave |
+| Index just above `flat_max_tokens` | walk mode; trace records `flat.est_tokens` for tuning the budget |
+| One flat request fails | its ids unjudged; `FINAL_PARTIAL`; route continues with the rest |
+| Flat mode, `extends` | leased ids dropped from the pool after answers arrive; delta from the rest |
 | Level-1 chunk fails | that node's unjudged children: if the whole node failed it's admitted as a dir candidate; partial chunks just lose those children |
 | Walk deadline mid-level | in-flight requests end at the deadline (their timeout ≤ remaining); frontier admitted as dirs; `WALK_DEADLINE` |
 | Route deadline before final pass | `deadline`; caps-only note; lease untouched |
@@ -521,7 +573,7 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 | Path hit to migration | `mig:` id; judged with migration card |
 | Extends: walk re-finds leased files | excluded from pool; used as anchors |
 | Extends, nothing new eligible | `no-candidates`; lease caps unioned; no content delta |
-| Pool > 40 | truncated by tier then score; `truncation` attribution |
+| Pool > 40 (walk mode) | truncated by tier then score; `truncation` attribution |
 | Exception in expansion | expansion empty; route continues; decision record notes `stage_error` |
 | Exception anywhere else | `error`, no note |
 
@@ -536,9 +588,9 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 | Path matching | 08 §7 |
 | Catalog reads per walk level (children, cards) | ≤ 5 ms |
 | Expansion + pool + selection | ≤ 15 ms |
-| Sequential round trips | `same`: 1; small repo: 2; walk repo: 2–4 (typically 3) |
+| Sequential round trips | `same`: 1; flat mode: 1; walk mode: 2–4 (typically 3) |
 | Judge requests per new-task route (walk repo) | typically 6–15; bounded by `max_frontier × ceil(children/chunk_size)` per level |
-| Input tokens per new-task route | 10–30k (spec §11.9), reported per route |
+| Input tokens per new-task route | flat: ≤ `flat_max_tokens` (40k); walk: 10–30k (spec §11.9); reported per route |
 | Memory | ≤ 50 MB |
 
 ---
@@ -551,17 +603,18 @@ All keys under `[router]` unless noted; 13-config owns validation. Probability t
 |---|---|
 | `skip.py` | ack table (with/without lease, "ok, fix it", emoji, punctuation, 5 words); control commands; empty; disabled |
 | `state.py` | truncation: under/over budget, whitespace cut, marker, determinism, multibyte text; key omission |
-| `call1.py` | question order; balanced chunking (40, 41, 92); continuity/needs_context only in chunk 0; state repeated; interpretation of each §4.6 row incl. every override |
+| `call1.py` | question order; no content questions; chunking only above `RequestLimits`; continuity/needs_context only in chunk 0; state repeated; interpretation of each §4.6 row incl. every override |
+| `flat.py` | `choose_mode` at, below and above the budget (and forced modes); question set (leaf types only, path-hit dirs and `mig:` added, stubs excluded); token-balanced chunking; state without continuity keys; partial failure → unjudged; `extends` drops leased ids |
 | `walk.py` | per-node aggregation over chunks; beam per node; guard conditions (each of the 4 preconditions false → no guard); flattening with factor; schema root flattening; dir admit at max depth; frontier cap; exclusions (hit files only, not ancestors); deadline admission; chunk failure; churn ordering |
-| `final.py` | split rule (under/over budget, type groups, single-group fallback); partial failure → unjudged |
+| `final.py` | one request; judge-level split above `RequestLimits`; partial failure → unjudged |
 | `select.py` | eligibility incl. path-hit floor and unjudged; redundancy; collapse (4/8 boundaries, direct-file count); diversity swap rules; budget; tie-breaks. Property tests: ≤ `max_pointers`; path hits never displaced by diversity; no dir together with its descendant; deterministic for a fixed input |
-| `pipeline.py` | every terminal in §4.1 reachable; lease commit only on the listed terminals; speculation cancelled on each discard path (ledger shows `cancelled`) |
+| `pipeline.py` | every terminal in §4.1 reachable in both modes; lease commit only on the listed terminals; speculation (flat and walk L1) cancelled on each discard path (ledger shows `cancelled`) |
 
 ### 8.2 Scripted-judge integration
 
-`ScriptedJudge` (tests only): answers from a rule table (`key pattern → p`, per-request latency, failure injection), driven by a controllable clock so deadline cases are deterministic. Runs on the synthetic fixture repos (00 §6.1): `feature_ts` (small repo, ≤ 60 cards), `layered_py` (walk, 3 levels), `monorepo_ts` (wide root), `schema_heavy` (supabase migrations).
+`ScriptedJudge` (tests only): answers from a rule table (`key pattern → p`, per-request latency, failure injection), driven by a controllable clock so deadline cases are deterministic. Runs on the synthetic fixture repos (00 §6.1): `feature_ts` (flat mode), `layered_py` (walk, 3 levels), `monorepo_ts` (wide root), `schema_heavy` (supabase migrations).
 
-Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-of-lease trace → `extends`; no-context; low needs_context + trace; guard; walk deadline; route deadline before final; final partial; call 1 chunk 0 failure; breaker open at start.
+Scenarios: new task walk (3 round trips); flat mode (1); `same`; `same` + out-of-lease trace → `extends`; no-context; low needs_context + trace; guard; walk deadline; route deadline before final; final partial; call 1 chunk 0 failure; breaker open at start.
 
 ### 8.3 Golden
 
@@ -570,7 +623,7 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 
 ### 8.4 Eval-driven (16)
 
-- A0 vs A1 on both repos' dev sets (Phase 2 exit).
+- A0 (flat everywhere) vs A4w (walk everywhere) on both repos' dev sets, reported by index size, to set `flat_max_tokens` (Phase 2 exit).
 - Attribution report covers 100 % of missed `must_include` labels with a stage.
 
 ---
@@ -579,7 +632,7 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 
 | Phase | Criterion |
 |---|---|
-| Phase 2 exit | A1 (walk, no expansion) beats A0 on precision at comparable recall on dev, or a documented reason to change approach; all §8.1–8.2 tests green; p50 new-task latency with live Jev ≤ 1.5 s on the layered repo |
+| Phase 2 exit | A0 vs A4w sets `flat_max_tokens` (flat must match walk precision at ≥ walk recall below the budget); A1 (walk, no expansion) beats A0 on precision at comparable recall on repos above it, or a documented reason to change approach; all §8.1–8.2 tests green; p50 new-task latency with live Jev ≤ 1.5 s on the layered repo |
 | Phase 3 exit | Expansion wired; attribution shows fewer `walk` losses on `cross_layer` queries than A1 |
 | Phase 4 exit | Continuity accuracy ≥ 0.9 on dev sequences, including the out-of-lease-trace override cases |
 | Phase 5 exit | Every §6 row has a test; fail-open tests green; deadline behavior verified with a slow judge |
@@ -603,8 +656,8 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 | D-09-8 | Guard when a node has no chosen children | Guard once per level, only if nothing chosen, no candidates, no path hits, `needs_context ≥ walk_guard` | Per-node guarding would expand irrelevant branches everywhere |
 | D-09-9 | Silent on dirs at `max_depth` | Admitted as directory candidates | The note can point at a directory; nothing is silently lost |
 | D-09-10 | No frontier cap | `max_frontier` = 12 | Bounds fan-out (beam 6 × 6 × 6) |
-| D-09-11 | Small repo: questions split only for > 40 capabilities | All call-1 questions balanced-chunked; continuity/needs_context in chunk 0 only; content questions skip dirs, `db:*`, `mig:` | 60 content + caps exceed one request |
-| D-09-12 | Final pass "one request, or two in parallel if split for mixed types" | Two only when the estimated tokens exceed 6,000, grouped code/doc vs schema | Makes "mixed types" concrete |
+| D-09-11 | Small repo: questions split only for > 40 capabilities | Superseded by spec D14/D16 (2026-09-24): no content in call 1; call 1 split only above the backend's limits, continuity/needs_context in chunk 0 | – |
+| D-09-12 | Final pass "one request, or two in parallel if split for mixed types" | One request; the judge splits only above its per-request limits (spec D20, 2026-09-24) | Question count doesn't drive Jev latency; `router.final_max_request_tokens` removed |
 | D-09-13 | Ambiguous basename → candidate (tier unspecified) | Tier 3, between walk and expansion | Evidence strength between the two |
 | D-09-14 | Migrations "also indexed as files" | Pool maps `code:` migration ids to `mig:` | F3; the note renders `mig:` |
 | D-09-15 | `extends`: walk then union | Leased items excluded from the pool (still anchors) | Can't be additions; frees final-pass slots |
@@ -612,8 +665,9 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 | D-09-17 | Deadline → capabilities only | Plus: no lease update on `deadline` / `judge-unavailable` | Otherwise a later `same` reuses a half route |
 | D-09-18 | Collapse rule "parent dir with ≤ 8 files" | Direct files; one pass; dir dropped when a descendant is also eligible | Precise, deterministic |
 | D-09-19 | Path hits kept unless final < 0.2 | Unjudged path hits (failed chunk) dropped | Consistent with Q-F7 |
-| D-09-20 | Walk state = request, project, location | Unchanged, and call-1 context keys are never added to walk state | Keeps speculation valid before continuity is known |
+| D-09-20 | Walk state = request, project, location | Unchanged, and call-1 context keys are never added to walk or flat state (spec D16) | Keeps speculation valid before continuity is known; avoids irrelevant state |
 | D-09-21 | Selection is part of the pipeline | `select(trace, params)` is pure over the trace; the trace is always passed to `on_route_done` | Offline threshold sweeps (16) and decision records (15) without re-routing |
+| D-09-22 | Small-repo mode below 60 content cards; walk otherwise (§3 D6) | Flat pass below a token budget, walk above; flat mode skips the walk, expansion and the final pass (spec D14, 2026-09-24) | See §4.5, §4.8 |
 
 ### Open questions
 
@@ -621,12 +675,16 @@ Scenarios: new task walk (3 round trips); small repo (2); `same`; `same` + out-o
 |---|---|---|---|
 | Q-09-1 | Add `previous_task` to final-pass state on `extends` ("also email the customer when *it* ships")? | No | Sequence eval: delta recall with/without |
 | Q-09-2 | `walk_guard` 0.5 and `beam_min` 1 | As listed | Dev: guard rate vs recall on `natural` queries |
-| Q-09-3 | Does Jev latency grow with questions per request? If so, split the final pass at ~20 | Split only by token budget | 07 conformance latency curve |
+| Q-09-3 | Does Jev latency grow with questions per request? If so, split the final pass at ~20 | Split only by token budget. Documented (2026-09-23): questions in a request are evaluated in parallel and "adding questions barely changes the response time"; TypeSafe's parallel-questions cookbook measures one 13-question call as ~10x faster than 13 single calls | 07 conformance latency curve confirms; no split unless it contradicts the docs |
 | Q-09-4 | `max_frontier` 12 | 12 | Layered repo recall vs requests per route |
-| Q-09-5 | Skip speculation when a lease exists and the prompt is short (likely `same`) | Always speculate | Wasted-token share in decision logs |
+| Q-09-5 | Skip speculation when a lease exists and the prompt is short (likely `same`)? A discarded flat pass is up to 40k tokens (~$0.0017) per `same` prompt | Always speculate | Wasted-token share and 429 share in decision logs |
 | Q-09-6 | Should a directory path hit seed the walk at that directory? | No (pool + flatten) | Links Q-08-6 |
 | Q-09-7 | Migration line for selected tables built by the note from `defined_in` edges | Yes (11) | 11 review |
 | Q-09-8 | On `deadline`, emit capability lines or nothing? | Capability lines (spec) | Agent behavior study |
 | Q-09-9 | Collapse on direct vs recursive file count | Direct | Eval precision on dir-collapsed notes |
 | Q-09-10 | 15 §3.3 wants the top 20 **rejected** expansion neighbours in the trace; 04's `expand()` returns admitted candidates only | 04 adds `expand(..., collect_rejected: int = 0)` returning `(admitted, rejected)` | Resolved: adopted in 04 §2/§4.5 |
 | Q-09-11 | Expansion keys: 16 §3.5 proposes `router.expand_kinds`, 04 §5 defines `router.expand.enabled_kinds` | Use 04's `router.expand.enabled_kinds`; 16's ablation overlays should be renamed | Resolved: 13 D-13-8; 16 renamed |
+| Q-09-12 | Spec §20 lists 7 Jev limitations; TypeSafe's jev-1.13 jaggedness page (reviewed 2026-09-17) lists 9. Not covered: indirection, contradictory instructions/criteria, structural invariants (a Noul and its negation don't sum to 1; Noul vs Choice), generation; plus English-first language support | The design already complies: every question is single-hop and positively phrased; `not_needed` comes from the low end of the `use` Noul (§4.6), never from a negated question; option descriptions stay aligned with the continuity instruction; no threshold crosses question types. Add the rows to spec §20 with owner approval; tag non-English prompts in the decision record for eval slicing (15) | Owner (spec edit) |
+| Q-09-13 | Route flat-first up to a per-route token budget instead of capping every request at 40 questions? | Adopted 2026-09-24 (spec D14, D15): §4.5, §4.8; `flat_max_tokens` = 40,000 is a starting value | A0 vs A4w by index size sets the budget (§9) |
+| Q-09-14 | A single abstract `needs_context` Noul separates poorly (jev-skillful measured and removed such a gate; TypeSafe's cookbook uses three action-phrased Nouls) | Flat mode: resolved 2026-09-24, the content answers are the gate (§4.6). Walk mode: keep the Noul; add a composite candidate (16 Q-16-9) | Eval: `no_context_gate` attribution bucket (walk mode) |
+| Q-09-15 | Merge speculative content questions into call 1, or drop the cancellation logic? | Resolved 2026-09-24: keep separate requests in the same wave (spec D16: call 1's `previous_task` is irrelevant state for content); keep `task.cancel()` on discard, which costs nothing because the route returns right after | – |

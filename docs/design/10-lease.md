@@ -71,7 +71,7 @@ Callers:
 |---|---|
 | `route/pipeline.py` (09) | `load` at route start, `effective_continuity` after call 1, `merge_extends` / `replace_new` via `commit` at the end |
 | `route/skip.py` (09) | `peek_active` for the ack rule (spec §11.2) |
-| `adapters/claude_code.py` (12) | `expire` on SessionStart `compact` / `clear` and on SessionEnd; `gc` on SessionStart |
+| `adapters/claude_code.py` (12) | `expire` on SessionStart `compact` and on SessionEnd (incl. `reason="clear"`); `gc` on SessionStart |
 | `cli.py` (12) | `expire(reason="reroute")` for `surf reroute`; `list_active` for `surf status` |
 | `adapters/mcp_server.py` (12) | same as pipeline; connection-scoped session ids |
 
@@ -316,7 +316,7 @@ commit(snap, outcome):
 |---|---|---|
 | Idle > `lease.idle_minutes` | checked on `load` and `peek_active` | delete lease file |
 | Compaction | Claude Code `SessionStart` with `source="compact"` | `expire(reason="compaction")` |
-| `/clear` | `SessionStart` with `source="clear"` | `expire(reason="clear")`. Claude Code may assign a new session id on clear; expire both the payload id and, if the adapter can't tell, leave the old one to idle-expire |
+| `/clear` | `SessionEnd` with `reason="clear"` (old session id); then `SessionStart` with `source="clear"` and a new id | `expire(reason="clear")` on the old id in SessionEnd. Verified 2026-09-23: "Running `/clear` starts a new session" (12 Q-12-1). If SessionEnd is skipped (crash), the old lease idles out |
 | Session end | Claude Code `SessionEnd` | `expire(reason="session-end")` |
 | `surf reroute` | CLI or in-prompt control command (12-delivery §4.3) | `expire(reason="reroute")` |
 | Session resume | `SessionStart` with `source="resume"` | keep the lease if not idle |

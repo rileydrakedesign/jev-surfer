@@ -2,6 +2,8 @@
 
 **Purpose:** a working checklist for verifying every assumption the design docs make about Jev, TypeSafe's API, the providers, and the agent harnesses. The docs were written in a sandbox that couldn't reach `docs.typesafe.ai`, so these items are marked **UNVERIFIED** or were written from memory.
 
+**Status (2026-09-23):** every row in §1 and §2 now has a result in §3. Items marked unanswerable are live-only and listed in [`jev-reference.md`](jev-reference.md) §15 and 07 §8.4.
+
 **Who uses it:** the agent (or person) doing the cross-referencing pass. It is a starting point, not a complete list. Add a row for anything else you find.
 
 ---
@@ -69,7 +71,7 @@
 
 | Id | What the docs assume | Where it lives | If wrong |
 |---|---|---|---|
-| J-C1 | There's no hard API limit below **40 questions per request** (40 is our own cap, spec principle 5) | 07 §4.2; 13 `judge.max_questions_per_request`; 09 `chunk_size` | If the API cap is lower, lower the default and note the latency impact in 09 §4.14 |
+| J-C1 | There's no hard API limit below **40 questions per request** (40 is our own cap, spec principle 5) | 07 §4.2; 13 `judge.max_questions_per_request`; 09 `chunk_size` | If the API cap is lower, lower the default and note the latency impact in 09 §4.15 |
 | J-C2 | Choice supports up to **255 options** (spec §20) | 07 §2.2 | Fix the number (v1 uses 3) |
 | J-C3 | Request size: our estimate caps requests at 8,000 tokens (`judge.max_request_tokens`) and the prompt is truncated to ~1,500 tokens head+tail | 07 §4.2; 09 (request truncation); 14 §4.2 redaction pipeline | Set the cap from the documented context limit |
 | J-C4 | Token estimate is `ceil(utf8_bytes / 4)` | 02 D-02-1 / Q-02-1; 07 §4.8 | If TypeSafe documents a tokenizer or counting endpoint, note it in Q-02-1 (the divisor changes only with a format-version bump) |
@@ -85,7 +87,7 @@
 | J-D4 | 429 responses carry `Retry-After` | 07 §4.6 | Adjust the retry rule |
 | J-D5 | Price is **$0.042 per million input tokens; output is free** | spec §11.9; 07 §4.8; 13 `judge.price_per_mtok_input` / `_output` | Fix the defaults; recheck the "well under $0.01 per route" goal (spec §1.2) |
 | J-D6 | HTTP/2 support (optional multiplexing) | 07 Q-07-3 | Record the answer |
-| J-D7 | Early-access status, quotas and SLA | spec §20 row "Hosted, early access"; 07 §4.7 breaker | Record them; they affect the breaker defaults only if quotas are tight |
+| J-D7 | confirmed (plus dynamic limits) | Launch blog (typesafe.ai/blog/introducing-system-one-models-and-jev, 2026-09-15): "available today in early access" with a waitlist; OpenRouter (listed 2026-09-18): "no waitlist or separate TypeSafe account". https://docs.typesafe.ai/models: "Rate limits are adjusting dynamically … can change without notice". No SLA in the docs | none; breaker defaults unchanged |
 
 ### E. Providers and gateways (owner: 07 §3.2)
 
@@ -109,7 +111,7 @@
 | Id | What the docs assume | Where it lives | If wrong |
 |---|---|---|---|
 | J-G1 | The spec §20 table matches TypeSafe's jev-1.13 jaggedness notes: accuracy drops with large, irrelevant state; instructions are read literally; weak at numbers and dates; susceptible to adversarial state | spec §20; 09 (≤ 40 candidates, bounded state); 14 | Add any missing limitation to `open-questions.md` with a proposed design response. Don't edit the spec. |
-| J-G2 | Behavior with many near-duplicate candidates (40 file cards from one directory) | 09 §4.8 walk chunking; 02 cards | Note it; it informs the chunk ordering and flatten rules (eval decides) |
+| J-G2 | Behavior with many near-duplicate candidates (40 file cards from one directory) | 09 §4.9 walk chunking; 02 cards | Note it; it informs the chunk ordering and flatten rules (eval decides) |
 | J-G3 | Recommended question phrasing (positive statements, "likely" vs "is") | 09 §3.3 wordings; 16 `wordings.yaml`; spec §25 Q1 | Add documented guidance as candidate wordings in 16, not as shipped wordings |
 | J-G4 | Language support (non-English prompts, identifiers) | 14 redaction; 09 | Record it |
 
@@ -169,8 +171,65 @@ Fill in one row per check. Keep "Evidence" to a URL plus a short quote.
 
 | Id | Status (confirmed / corrected / unanswerable) | Evidence (URL, date, quote) | Docs changed |
 |---|---|---|---|
-| J-A1 | | | |
-| … | | | |
+| J-A1 | confirmed | https://docs.typesafe.ai/api, 2026-09-23: "POST https://api.typesafe.ai/v1/systemone" | 07 §3.1 (no longer UNVERIFIED) |
+| J-A2 | confirmed | https://docs.typesafe.ai/api: "Authorization: Bearer <API_KEY>"; https://docs.typesafe.ai/sdk/python/api/constants: `API_KEY_ENV = 'TYPESAFE_API_KEY'` | none |
+| J-A3 | corrected | https://docs.typesafe.ai/api: Choice takes "`criteria` … A map of option to rubric description"; Noul takes optional `criteria` {`true`,`false`}; `instructions` "string \| object \| array" | 07 §2.2, §3.1 (encode `options` → `criteria`); jev-reference §3 |
+| J-A4 | confirmed (wider) | https://docs.typesafe.ai/api: `state` "string \| object \| array"; https://docs.typesafe.ai/concepts/state: "Use an object for most requests so each part of the state has a descriptive name" | none (surf sends an object of strings); backticked state paths noted as a wording candidate (16 Q-16-9) |
+| J-A5 | confirmed | https://docs.typesafe.ai/api: "You choose each key … The key is not sent to the underlying model and is not used in inference." Grammar/length undocumented | 07 §3.1 (keep opaque keys; option keys *are* seen by the model) |
+| J-A6 | corrected | https://docs.typesafe.ai/api: Noul answer `{"type":"noul","noul":0.95}`; Choice `{"type":"choice","choice",…,"probabilities",…,"confidence"}`; top level also has `model` | 07 §2.2, §3.1, §4.3 (aliases dropped; `type` checked; `model` echo checked) |
+| J-A7 | confirmed | https://docs.typesafe.ai/api: `usage` (required) with `input_tokens`, `output_tokens` | 07 §4.8; 02 Q-02-1 |
+| J-A8 | corrected | https://docs.typesafe.ai/api errors table: 401, 422 ("failed validation … the body details the offending field"), 429, **529 Overloaded**; https://docs.typesafe.ai/sdk/python/api/retries: retries `{408, 429, *range(500, 600)}`, honors `Retry-After` and `retry-after-ms` | 07 §4.6 (408, 529, `retry-after-ms`), §6; `request_id` from `x-typesafe-request-id` (07 §3.3) |
+| J-A9 | confirmed | https://docs.typesafe.ai/models: "`jev-1.13.0`"; aliases `jev-latest`, `jev-preview`; "The response's `model` field reports the versioned ID that answered … pin that version's ID instead of the alias" | 07 §4.3 (model echo), 13 (alias warning covers `*preview*`) |
+| J-B1 | confirmed | https://docs.typesafe.ai/primitives/noul: "the probability that the answer is yes where 0 means no and 1 means yes"; https://docs.typesafe.ai/introduction/machine-learning-primer: calibrated (RLCD) | none |
+| J-B2 | corrected | https://docs.typesafe.ai/api: `confidence` required, "derived from probabilities"; https://docs.typesafe.ai/primitives/choice examples: probabilities 0.61/0.35/0.04 → confidence 0.42, so not `max(probs)` | 07 §2.2, §4.3 (missing `confidence` from `jev` → key invalid; `max(probs)` fallback kept only for `llm`/`systemone-local`) |
+| J-B3 | corrected | https://docs.typesafe.ai/api: options go in `criteria`; values may be string, object, array or `null`; https://docs.typesafe.ai/primitives/choice: "The option names and their descriptions are both sent to the model" | 07 §3.1 (wire mapping only; internal `ChoiceQ.options` unchanged) |
+| J-B4 | confirmed | https://docs.typesafe.ai/model-jaggedness/jev-1.13: "Don't carry a threshold tuned on a Noul over to a Choice" | none |
+| J-B5 | confirmed | https://docs.typesafe.ai/primitives/score: Score returns `score`, `legend`, `probabilities`, `confidence`; 2–10 levels (https://docs.typesafe.ai/api). v2 idea: Choice-based ranking, not Score (16 Q-16-10) | 16 Q-16-10 |
+| J-B6 | confirmed | https://docs.typesafe.ai/primitives: "Every answer is independent. One question's answer is not hidden context for another. You can add or remove questions without changing the others' results." | 07 Q-07-2 narrowed to a sanity check |
+| J-B7 | confirmed (plus optional criteria) | https://docs.typesafe.ai/primitives: `instructions` is "the question you are asking … or … a statement for the model to judge"; no system prompt field. Noul `criteria` and structured instructions are optional extras | 07 Q-07-8; 16 Q-16-9 |
+| J-B8 | confirmed | https://docs.typesafe.ai/model-jaggedness/jev-1.13: "State is data, and `jev-1.13` does not treat it as hostile by default … can move the answer." No server-side mitigation documented | 14 §4.9 T4 |
+| J-C1 | confirmed | No question cap in https://docs.typesafe.ai/api or https://docs.typesafe.ai/primitives; limits are context-based (https://docs.typesafe.ai/models). Cookbooks send 182–218 options in one request | 07 §4.2 wording |
+| J-C2 | confirmed | https://docs.typesafe.ai/api: "You can have a maximum of 255 options per Choice." | none |
+| J-C3 | confirmed (cap kept) | https://docs.typesafe.ai/models: "64k tokens per request; 32k tokens for `state` plus the longest question" | 07 §4.2; 13 range 1,000–64,000 for `judge.max_request_tokens` (default 8,000 kept for accuracy) |
+| J-C4 | unanswerable → Phase 0 | No tokenizer or counting endpoint documented; responses report `usage.input_tokens`. Examples show ~296 tokens for a 1-question request (fixed overhead) | 02 Q-02-1, 07 §4.8 |
+| J-C5 | unanswerable | No length limit for instructions or criteria beyond the context budget | none |
+| J-D1 | confirmed | https://docs.typesafe.ai/concepts/how-to-build-with-system-one: "Most queries complete in about 100 ms"; consistency cookbooks: 111 ms / 114 ms mean round trip | 07 §4.5, 09 §4.15 (note); targets look reachable, `open-questions.md` §1 row 6 unaffected |
+| J-D2 | confirmed | https://docs.typesafe.ai/primitives: "System One models evaluate every question in a request in parallel. Adding questions barely changes the response time" | 09 Q-09-3 (resolved pending the Phase 0 curve) |
+| J-D3 | corrected | https://docs.typesafe.ai/models: "250,000 tokens per second / 1,200 requests per minute", "can change without notice"; https://docs.typesafe.ai/cookbooks/entity_alignment: "the public endpoint rate-limits above roughly eight" | 07 §4.4, §5, D-07-8; 13 default 8; 16 §7 |
+| J-D4 | corrected (not guaranteed) | https://docs.typesafe.ai/models: SDKs "honor the `retry-after` header when the response carries one"; SDK also reads `retry-after-ms` | 07 §4.6 |
+| J-D5 | confirmed | https://docs.typesafe.ai/models: "\$42 / \$0.042" per Btok/Mtok; "Charged per input token. Output tokens are free." | 07 §4.8 (quote) |
+| J-D6 | unanswerable → Phase 0 | HTTP/2 not mentioned | 07 Q-07-3 |
+| J-D7 | corrected | No "early access" wording; https://docs.typesafe.ai/models warning: "Rate limits are adjusting dynamically … Higher limits are available on custom and enterprise plans." No SLA in docs; MCA has a generic service warranty | spec §20 row "Hosted, early access" is stale (Q-09-12 lists spec §20 updates); breaker defaults unchanged |
+| J-G1 | corrected (gaps) | https://docs.typesafe.ai/model-jaggedness/jev-1.13 lists 9 modes; spec §20 misses indirection, contradictory instructions/criteria, structural invariants, generation, language | 09 Q-09-12; `open-questions.md`; jev-reference §10 (spec not edited) |
+| J-G2 | unanswerable | Not documented. Related advice: structured option descriptions with `not_for` separate lookalikes (https://docs.typesafe.ai/primitives/advanced) | none; eval decides (09 §4.9) |
+| J-G3 | confirmed (guidance found) | https://docs.typesafe.ai/primitives/noul: "Phrase the question so that a high value means yes … A statement works as well as a question"; backticked state paths; structured instructions; Noul `criteria` | 16 Q-16-9 (candidates only) |
+| J-G4 | confirmed | https://docs.typesafe.ai/models: "English is the primary training language … Other languages, including CJK scripts, are handled but not equally well" | 09 Q-09-12 |
+| J-E1 | corrected | https://openrouter.ai/docs/guides/community/typesafe-sdk: requests go to "`https://openrouter.ai/api/v1/systemone`"; "`jev-1.13` is routed as `typesafe/jev-1.13`"; responses "contain `model`, `answers`, and `usage`" plus `id`, `provider`, `usage.cost`; errors `{"error":{"code","message"}}`, adds 402 | 07 §3.2 (native envelope, id `typesafe/jev-1.13`, 402 → `AUTH`) |
+| J-E2 | corrected | https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe: "`POST /typesafe/v1/systemone`" on `https://ai-gateway.vercel.sh`, `"model": "typesafe-ai/jev"`, "The response uses TypeSafe's field names"; errors `{message, error_type}`; key `AI_GATEWAY_API_KEY` confirmed | 07 §3.2 |
+| J-E3 | corrected → dropped | Cloudflare AI Gateway provider list (developers.cloudflare.com/ai-gateway/llms.txt) has no TypeSafe; Jev is the Workers AI third-party model `typesafe/jev` at `/client/v4/accounts/{id}/ai/run` with body `{"model","input":{…}}` (developers.cloudflare.com/ai/models/typesafe/jev/) | 07 §3.2, D-07-9; 13 (`judge.cloudflare.*`, `CF_AIG_TOKEN` removed) |
+| J-E4 | confirmed (answers, usage); corrected (`model`) | All three document the same `answers` and `usage`. `model` echo differs: `jev-1.13.0` / `typesafe/jev-1.13-20260917` / `typesafe-ai/jev`. Numeric identity across providers unanswerable without keys | 07 §3.2 (`normalize_model`), Q-07-6 Phase 0 item |
+| J-E5 | corrected | TypeSafe pins `jev-1.13.0`; OpenRouter pins minor (`typesafe/jev-1.13`); Vercel `/typesafe/v1/models` lists only `jev` | 07 §3.2; 16 §6 (live eval requires `typesafe`) |
+| J-F1 | corrected | https://pypi.org/pypi/typesafe-sdk/json: `typesafe-sdk` 0.7.1, MIT, Python ≥ 3.10; import `typesafe_sdk`; `typesafe-sdk-python` is the GitHub repo name | 07 D-07-2; `open-questions.md` §1 row 3 (spec §22.1 not edited) |
+| J-F2 | confirmed (facts) | `AsyncTypeSafeClient` exists; `base_url` gateway support (docs sdk/python/usage shows OpenRouter and Vercel); depends on `httpx2`, pydantic, tenacity; measured `import typesafe_sdk` ≈ 243 ms vs httpx + pydantic ≈ 129 ms (7 cold runs, Py 3.11); "request and response bodies are not" redacted in logs | 07 D-07-2 kept with new evidence; Q-07-1 resolved |
+| J-H1 | confirmed | awesome-jev "Open reproductions": "independent efforts, not official TypeSafe releases"; Laya `laya-serve` on `127.0.0.1:8321/v1/systemone`, "degrades past about 20 options"; LitJev "Probabilities are not calibrated by default" | 07 §3.2 `local` notes |
+| J-H2 | confirmed (with caveats) | No published Jev weights. Laya: Apache-2.0 package and HF weights; kev Apache-2.0; open-jev on gated Gemma weights; openjev-sglang no LICENSE | 07 §3.2; jev-reference §14 (A7 uses Laya) |
+| J-I1 | corrected | Shallow clones 2026-09-23: MIT = jev-code-context-router, JevRouter, jev-codex-router, langchain-skill-router, jev-skillful; no LICENSE = jev-router, blink, jev-knowledge-base | 07 Q-07-9 (spec §4 needs owner edit) |
+| J-I2 | confirmed | All eight use `criteria`, `noul`, `probabilities`, `confidence`, `usage.input_tokens`; jev-codex-router caps 40 questions; jev-skillful retries {429, 502, 503, 504, 529}; one defaults a missing answer to `noul = 0.0` (anti-pattern) | 07 §4.3/§4.6 already match |
+| H-C1 | confirmed (+ fields) | https://code.claude.com/docs/en/hooks: common fields `session_id`, `transcript_path`, `cwd`, `hook_event_name`, plus `prompt_id`, `permission_mode`, …; pasted text arrives "between a `<pasted_content id=\"…\">` line and a `</pasted_content id=\"…\">` line" | 12 §4.4 input table |
+| H-C2 | confirmed (+ cap) | https://code.claude.com/docs/en/hooks: `hookSpecificOutput.additionalContext`; "capped at 10,000 characters" | 12 §4.4 (9,500-char guard) |
+| H-C3 | corrected | https://code.claude.com/docs/en/hooks: `source` also `fork` ("Before v2.1.214, forked sessions reported source `resume`") | 12 §4.4, §4.4.5 |
+| H-C4 | confirmed | https://code.claude.com/docs/en/hooks SessionEnd reasons `clear`, `resume`, `logout`, `prompt_input_exit`, `other`; "default timeout of 1.5 seconds"; output discarded | 12 §4.4.5 (D-12-5 now required) |
+| H-C5 | confirmed: changes | https://code.claude.com/docs/en/interactive-mode: "Running `/clear` starts a new session" | 12 Q-12-1 resolved; 10 §4 expiry table |
+| H-C6 | unanswerable | https://code.claude.com/docs/en/hooks: transcript "is written asynchronously and may lag … may not yet include the current turn's most recent messages" | 12 Q-12-2 narrowed |
+| H-C7 | partly confirmed | https://code.claude.com/docs/en/sessions: "transcripts as JSONL at `~/.claude/projects/<project>/<session-id>.jsonl`"; per-line schema undocumented; `CLAUDE_CONFIG_DIR` moves `~/.claude` | none (reader already tolerant; use payload `transcript_path` only) |
+| H-C8 | confirmed (1 correction) | https://code.claude.com/docs/en/hooks: event → matcher group → handler; `timeout` in seconds; "All matching hooks run in parallel"; hooks held back until workspace trust | 12 §4.4.6 step 4 |
+| H-C9 | corrected | https://code.claude.com/docs/en/skills: "Custom commands have been merged into skills"; nested `.claude/skills`; https://code.claude.com/docs/en/mcp: scopes `~/.claude.json` (local, user) and `.mcp.json` (project), no `mcpServers` key in settings; https://code.claude.com/docs/en/sub-agents: identity "from the `name` frontmatter field" | 01 Q-01-5 |
+| H-C10 | partly confirmed | https://code.claude.com/docs/en/settings: `enabledPlugins` `"plugin@marketplace": bool`, missing entry → manifest `defaultEnabled`; `installed_plugins.json` schema undocumented | 01 Q-01-2 narrowed |
+| H-O1 | corrected | Codex docs: `~/.codex/config.toml`, trusted-project `.codex/config.toml`; "Custom prompts are deprecated. Use skills"; skills at `.agents/skills` and `~/.agents/skills`; agents `.codex/agents/*.toml` | 01 Q-01-5 |
+| H-O2 | confirmed | cursor.com/docs/mcp: "`.cursor/mcp.json` in your project … `~/.cursor/mcp.json`", key `mcpServers` | none |
+| H-O3 | corrected | opencode.ai/docs/config: plural `agents/`, `commands/`, `skills/` ("Singular names … also supported"); global `~/.config/opencode/opencode.json`; MCP `command` array + `environment` | 01 Q-01-5 |
+| H-M1 | corrected | modelcontextprotocol.io spec 2026-07-28: "remove the `initialize`/`notifications/initialized` handshake"; servers "MUST implement" `server/discover`, whose result carries `instructions`; clients fall back to `initialize` for legacy servers | 02 live listing, 14 §4.1/§4.5 (also aligned page cap to 5) |
+| H-M2 | corrected | github.com/modelcontextprotocol/python-sdk: "FastMCP is now MCPServer … the old import path is gone"; `pip install mcp` installs 2.x | 12 §4.5, Q-12-8 |
 
 ## 4. Done when
 

@@ -153,12 +153,14 @@ The sanitizer is deterministic and part of card inputs, so a change to it change
 
 | # | Egress | When | Payload | Controls |
 |---|---|---|---|---|
-| E1 | Judge request (`jev`, `llm`, remote `systemone-local`) | per route; `surf doctor --live` ping | JSON state + questions: redacted prompt/previous task/last message, project descriptor, card strings | redaction on all strings; caps (≤ 40 questions, prompt ≤ ~1,500 tokens); TLS verify on |
-| E2 | Live MCP listing (HTTP servers) | `surf init --live-mcp`, `surf index` when `capabilities.live_mcp` lists the server | MCP `initialize` + `tools/list` only | opt-in per server; §4.5 |
+| E1 | Judge request (`jev`, `llm`, remote `systemone-local`) | per route; `surf doctor --live` ping | JSON state + questions: redacted prompt/previous task/last message, project descriptor, card strings | redaction on all strings; caps (per-backend request limits, prompt ≤ ~1,500 tokens, state ≤ ~2k tokens); TLS verify on |
+| E2 | Live MCP listing (HTTP servers) | `surf init --live-mcp`, `surf index` when `capabilities.live_mcp` lists the server | MCP `server/discover` (or legacy `initialize`) + `tools/list` only | opt-in per server; §4.5 |
 | E3 | Live MCP listing (stdio servers) | same | none directly; the child process may do its own networking | opt-in per server; the user already runs this server in their harness |
 | — | Telemetry, update checks, crash reports | never | — | no code path exists; a test asserts it (§8) |
 
-Everything else (discovery, git, schema parsing, co-change, schema refs, catalog, lease, logs, eval scoring) is local. `surf init` prints E1–E3 as the privacy table (spec §15.6 step 2) and requires confirmation.
+Everything else (discovery, git, schema parsing, co-change, schema refs, catalog, lease, logs, eval scoring) is local.
+
+What TypeSafe says it does with E1 payloads (checked 2026-09-23; the privacy statement may quote these, with links, but must not promise more): "Jev is not trained on customer requests or responses" (docs, Models → Data handling); zero data retention is offered to enterprise customers only; the Master Customer Agreement lets TypeSafe keep "Telemetry" (logs, hashes, statistics) about use of the service. So a default account should be assumed to retain request data for some period. Through gateways the terms are the gateway's: OpenRouter lists Jev with `"training": false, "retainsPrompts": false`; Vercel AI Gateway lists it as `"zdr": "all"` (both checked 2026-09-23). E1 minimization (redaction, cards without file contents) is the control that holds regardless. `surf init` prints E1–E3 as the privacy table (spec §15.6 step 2) and requires confirmation.
 
 `systemone-local` with a non-loopback, non-RFC1918 endpoint is **not** local: `surf doctor` warns and `surf status` shows "judge: remote (<host>)". The spec §19.2 claim "nothing leaves the machine" holds only for loopback endpoints and `null` (D-14-3).
 
@@ -202,7 +204,7 @@ Design choices:
 - Filter, don't reject: dropping every skill description that says "Use this skill whenever…" would destroy capability recall. R1 only fires on *request-universal* claims, not on "use when writing migrations".
 - `injection_flags()` records which rules fired; counts go into `meta.json` (`sanitizer.injection_hits`) and `surf doctor` lists the affected ids so a human can see a poisoned doc.
 - The filter changes card text, so it's part of card inputs (hash).
-- It is a heuristic. The load-bearing defenses remain structural: no code/comments in cards, ≤ 40 candidates, routing grants nothing, the note says "use your normal search", and the adversarial eval gate (§4.7).
+- It is a heuristic. The load-bearing defenses remain structural: no code/comments in cards, bounded state (≈ 2k tokens), routing grants nothing, the note says "use your normal search", and the adversarial eval gate (§4.7).
 
 ### 4.5 Live MCP listing isolation
 
@@ -213,7 +215,7 @@ Applies to `extract_caps.py` (02) when a server is in `capabilities.live_mcp`.
 | Opt-in | Only servers named in `capabilities.live_mcp`. `surf init --live-mcp` shows the **exact command line / URL** per server and asks per server. Servers from a **project** config (`.mcp.json` in the repo) default to *not* live even with `--live-mcp`; the prompt says "defined by the repository, not by you". Rationale: a cloned repo's `.mcp.json` is untrusted code. |
 | Spawn | `subprocess.Popen(argv, shell=False, stdin/stdout=PIPE, stderr=PIPE, cwd=repo_root, start_new_session=True)`. `argv` from config; `${VAR}` references resolved at spawn time from the parent env. |
 | Env | Minimal base (`PATH`, `HOME`, `LANG`, `LC_ALL=C.UTF-8`, `TMPDIR`, `SYSTEMROOT` on Windows) plus the server's configured `env` block. The resolved values exist only in the child env and in memory. |
-| Protocol | Send `initialize` (clientInfo `surf/<version>`, **empty** client capabilities: no `sampling`, `roots`, `elicitation`), `notifications/initialized`, then `tools/list` with pagination, max 5 pages / 500 tools. Any server→client request is answered with JSON-RPC error `-32601`. `tools/call`, `resources/*`, `prompts/*` are never sent; a unit test asserts the client object has no method that sends them. |
+| Protocol | Send `server/discover` (2026-07-28 MCP spec), falling back to `initialize` + `notifications/initialized` for legacy servers (clientInfo `surf/<version>`, **empty** client capabilities: no `sampling`, `roots`, `elicitation`), then `tools/list` with pagination, max 5 pages / 500 tools. Any server→client request is answered with JSON-RPC error `-32601`. `tools/call`, `resources/*`, `prompts/*` are never sent; a unit test asserts the client object has no method that sends them. |
 | Limits | 10 s total per server (`capabilities.live_timeout_ms`), 2 MiB stdout cap, then SIGTERM the process group, SIGKILL after 1 s. |
 | Output scrubbing | Before sanitizing, every captured string is checked for the literal value of each resolved env var of length ≥ 8; a hit drops that string. Then normal `sanitize_field`. |
 | stderr | Read into a 4 KiB ring buffer, redacted, shown only in the error message on failure; never logged to file. |
@@ -301,7 +303,7 @@ Assets: source code and secrets in the repo, prompt text, developer identity, in
 | T1 | Secret in prompt sent to judge | developer (accidental) | pasted logs, `.env` contents in prompt | §4.2 redaction; head/tail cap | Unknown key formats below the entropy rule |
 | T2 | File contents sent to judge | — | card builder bug | cards built from metadata only; canary egress test (§8) | Doc headings/titles are content by design |
 | T3 | Secret file indexed | — | `.env`, keys in repo | §3.2 globs; never opened | Secrets in ordinary source files (bodies never read, so not exposed) |
-| T4 | Routing manipulation | malicious contributor, third-party docs | doc headings, skill/MCP descriptions, file names | §4.4 filter; caps; ≤ 40 candidates; adversarial gates §4.7 | Misleading pointer or advisory skip; recoverable by design (spec §19.4) |
+| T4 | Routing manipulation | malicious contributor, third-party docs | doc headings, skill/MCP descriptions, file names | §4.4 filter; card caps; bounded state; adversarial gates §4.7 | Misleading pointer or advisory skip; recoverable by design (spec §19.4). TypeSafe confirms the premise and offers no server-side mitigation: "State is data, and `jev-1.13` does not treat it as hostile by default. Content written to adversarially steer the model … can move the answer"; its advice is explicit criteria and testing. Cards go into `instructions`, not `state`, so the same caution applies to both |
 | T5 | Agent-context injection via note | malicious contributor | crafted path/name with newlines | §4.3 `path_is_safe`, `safe_name`, no prose in note | None known |
 | T6 | Code execution at index time | malicious repo | project `.mcp.json` + `--live-mcp` | project-defined servers not live by default; per-server consent showing argv | User consents to a malicious command |
 | T7 | Malicious MCP server abuses the listing session | configured server | sampling/roots requests, huge output, echoing tokens | empty client caps; −32601; output caps; env-value scrub; timeout | Server's own side effects on spawn |

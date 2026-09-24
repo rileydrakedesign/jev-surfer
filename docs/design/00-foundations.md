@@ -170,7 +170,7 @@ The spec commits `catalog.jsonl`, `edges.jsonl` and `meta.json`, and CI runs `su
 - **Proposed default: `index.commit_catalog = false`** (05 D-05-1, 06 D-06-1, open question Q-06-1). The catalog lives in `.surf/cache/`, and the router **always reads `cache/`** (05 D-05-5). A committed catalog is an opt-in *baseline* that changes only via `surf index --baseline`; git hooks only ever write to `cache/`. The determinism rules above still apply to both, because `--check` and the eval fixtures rely on them.
 - **Local-only cards.** A card is committable only if every input it was built from is committable (01 D-01-1). Cards built from untracked files or user-level capability configs go to **`.surf/cache/overlay.jsonl`** and are merged at load time. This is the only name for that file; 13 and 14 refer to it.
 - **Stored edge set.** `contains` edges aren't written to `edges.jsonl` (they're derived from `Card.parent`), and symmetric kinds (`co_change`, `dir_coupling`, `alias`) are stored once with `from < to` (04 D-04-1, D-04-4). **Nothing outside `catalog/` reads the JSONL files directly**; use the store API in 05.
-- **Small-repo count.** `mig:` cards and external stub tables (03 D-03-3) don't count as content cards for `router.small_repo_cutoff`.
+- **Flat set.** `mig:` cards and external stub tables (03 D-03-3) are not content cards and are never asked in the flat pass (09 §4.5, 05 `flat_cards()`).
 
 ### 4.2 Clock
 

@@ -55,7 +55,8 @@ class CatalogReader(Protocol):
     def ids_for_suffix(self, suffix: str, *, casefold: bool = False) -> list[SurfaceId]: ...
     def ids_for_basename(self, name: str, *, casefold: bool = False) -> list[SurfaceId]: ...
     def capabilities(self) -> list[Card]: ...
-    def content_cards(self) -> Iterator[Card]: ...                 # small-repo mode, eval A0
+    def flat_cards(self) -> Iterator[Card]: ...                    # 09 flat pass, eval A0: code_file, doc_file, db_table; excludes dirs, db:*, mig:, external stubs (00 §4.1)
+    def flat_card_tokens(self) -> int: ...                          # Σ approx_tokens(card) over flat_cards(), from meta (09 §4.5 mode choice)
     def content_card_count(self) -> int: ...                        # excludes mig: cards and external-stub tables (00 §4.1)
     def close(self) -> None: ...
 
@@ -147,7 +148,8 @@ class Meta(BaseModel, frozen=True):
     git_version: str | None                            # volatile (warn only)
     counts: dict[SurfaceType, int]                     # sorted keys
     content_cards: int
-    walk_mode: Literal["flat", "walk"]
+    flat_cards: int                                    # len(flat_cards()); 09 §4.5
+    flat_card_tokens: int                              # Σ approx_tokens(card) over flat cards; the router adds per-question and per-request overhead
     descriptor: str                                    # derived project descriptor (02 §4.10); config overrides at query time
     sanitizer: dict[str, int]                          # {"injection_hits": n} (14 §4.4)
     tool_versions: dict[str, str]                      # e.g. {"sqlglot": "…"} (03) — volatile (warn only)

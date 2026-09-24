@@ -43,7 +43,8 @@ Jev is a "System One" model: it takes a `state` and a map of typed questions and
 | Key env var (SDK convention) | `TYPESAFE_API_KEY` | SDK constants |
 | Base URL env var (SDK only) | `TYPESAFE_BASE_URL` (default `https://api.typesafe.ai`) | SDK constants |
 | Model listing | `GET https://api.typesafe.ai/v1/models` → `{"models": [{"name", "description", "release_date"}]}`; lists aliases; versioned ids are accepted even if unlisted | Models |
-| Request id | `x-typesafe-request-id` response header | SDK exceptions (`request_id`) |
+| Request id | `x-typesafe-request-id` response header (observed: `req_…`) | SDK exceptions (`request_id`), probe |
+| Transport | HTTP/2 negotiated via ALPN; served by Envoy (`server: istio-envoy`) | Probe 2026-09-24 |
 
 ## 3. Request body
 
@@ -113,6 +114,7 @@ This corrects the spec §11.4 illustration: Choice options go in **`criteria`**,
 | Status | Meaning (API) | surf (07 §4.6) |
 |---|---|---|
 | 401 | Missing or invalid API key | `AUTH`, no retry, breaker opens 600 s |
+| 403 | Observed 2026-09-24 for a request with **no** key (not in the docs): body `{"detail": {"error_type": "authentication_error", "message": "Must supply an API key! …"}}` | `AUTH` (07 already maps 403) |
 | 422 | Body failed validation; JSON body names the field | `HTTP_4XX`, no retry (our bug) |
 | 429 | Rate limit exceeded; "back off and retry after a short delay" | Retry once if the server wait fits the deadline |
 | 529 | "TypeSafe is temporarily overloaded" | 5xx class, retry once |
@@ -250,7 +252,7 @@ Everything below is either undocumented or documented only by example. 07 §8.4 
 | Live responses match §3–4 (shapes, `model` echo, `usage`) | Docs can drift from the service | 07 §8.4 |
 | Identical-request spread (×20) | Separates noise from the cookbook's `uid` confound | Q-16-2 |
 | Same question in two batches (×20) | Confirms documented independence | Q-07-2 |
-| Latency vs question count, cold and warm | Confirms "barely changes"; sizes TLS cost | Q-09-3, Q-07-3 |
+| Latency vs question count (1, 40, 100, 300), cold and warm, HTTP/1.1 vs HTTP/2 | Confirms "barely changes" at flat-mode sizes; sizes TLS cost | Q-09-3, Q-09-13, Q-07-3 |
 | 16-way burst: 429 share, `Retry-After` presence | Concurrency default | D-07-8, Q-07-7 |
 | Reported `input_tokens` vs `ceil(bytes/4)` | Token heuristic, fixed overhead | Q-02-1 |
 | Question-id grammar and length | We send opaque `q000` anyway; only matters if that changes | 07 §3.1 |

@@ -41,6 +41,7 @@ A **task lease** reuses the selection while follow-up prompts continue the same 
 | `docs/build-plan.md` | Work items `P<phase>.<n>`, each mapped to a design doc and a module. Use the ids in branch names, commit subjects and issues. |
 | `docs/open-questions.md` | Register of every deviation (`D-NN-k`) and open question (`Q-NN-k`). §1 lists the decisions that need the owner. |
 | `docs/jev-reference.md` | Verified Jev/TypeSafe reference: endpoint, request/response shapes, limits, rate limits, latency, pricing, answer semantics, jaggedness, SDK. Read it before touching `judge/`. |
+| `docs/architecture-review.md` | Architecture review against the Jev docs (2026-09-24). Proposals Q-09-13…15, Q-07-10/11, Q-12-9 are pending eval or owner decisions; read before changing the router's request shape. |
 | `docs/jev-docs-checks.md` | Checklist of every Jev, TypeSafe and harness assumption, with the verification results (§3) and what is left for the Phase 0 live test. |
 
 Component → doc → code:
